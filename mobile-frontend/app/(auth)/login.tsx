@@ -1,0 +1,356 @@
+import { View, Text, StyleSheet, TouchableOpacity, TextInput, ScrollView, ActivityIndicator } from 'react-native';
+import { useRouter } from 'expo-router';
+import { useFonts, Inter_400Regular, Inter_500Medium, Inter_700Bold } from '@expo-google-fonts/inter';
+import { useFonts as useLibreFonts, LibreBaskerville_700Bold } from '@expo-google-fonts/libre-baskerville';
+import { Colors, FontSizes, Spacing, BorderRadius } from '../../constants/theme';
+import { useState } from 'react';
+import { FontAwesome } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
+import { apiCall, ENDPOINTS, saveToken } from '../../services/api';
+
+export default function LoginScreen() {
+  const router = useRouter();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const [fontsLoaded] = useFonts({
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_700Bold,
+  });
+
+  const [libreLoaded] = useLibreFonts({
+    LibreBaskerville_700Bold,
+  });
+
+  if (!fontsLoaded || !libreLoaded) return null;
+
+  const handleLogin = async () => {
+    setError('');
+    setLoading(true);
+    try {
+      const data = await apiCall(ENDPOINTS.login, 'POST', { email, password });
+      await saveToken(data.access, data.refresh);
+
+      const role = data.user.role;
+
+      if (role === 'patient') {
+        router.replace('/(patient)/patient-dashboard' as any);
+      } else if (role === 'hospital') {
+        router.replace('/(hospital)/HospitalPortal' as any);
+      } else if (role === 'ambulance_service') {
+        router.replace('/(ambulance)/dashboard' as any);
+      }
+    } catch (err: any) {
+      setError(err.detail || 'Login failed. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <ScrollView
+      style={styles.scroll}
+      contentContainerStyle={styles.container}
+      showsVerticalScrollIndicator={false}
+    >
+
+      {/* MERA Header with lines */}
+      <View style={styles.headerContainer}>
+        <View style={styles.line} />
+        <Text style={styles.meraHeading}>MERA</Text>
+        <Text style={styles.meraSubtitle}>Medical Emergency Response App</Text>
+        <View style={styles.line} />
+      </View>
+
+      {/* Welcome Back */}
+      <Text style={styles.welcomeHeading}>Welcome Back</Text>
+      <Text style={styles.welcomeSubtitle}>Sign in to your account</Text>
+
+      {/* Error Message */}
+      {error ? (
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorText}>{error}</Text>
+        </View>
+      ) : null}
+
+      {/* Email Input */}
+      <View style={styles.inputContainer}>
+        <Text style={styles.label}>EMAIL ADDRESS</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Enter your email"
+          placeholderTextColor={Colors.textSecondary}
+          value={email}
+          onChangeText={setEmail}
+          keyboardType="email-address"
+          autoCapitalize="none"
+        />
+      </View>
+
+      {/* Password Input */}
+      <View style={styles.inputContainer}>
+        <Text style={styles.label}>PASSWORD</Text>
+        <View style={styles.passwordRow}>
+          <TextInput
+            style={styles.passwordInput}
+            placeholder="Enter your password"
+            placeholderTextColor={Colors.textSecondary}
+            value={password}
+            onChangeText={setPassword}
+            secureTextEntry={!showPassword}
+            autoCapitalize="none"
+          />
+          <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
+            <Text style={styles.showHide}>{showPassword ? 'Hide' : 'Show'}</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Forgot Password */}
+      <TouchableOpacity style={styles.forgotContainer}>
+        <Text style={styles.forgotText}>Forgot password?</Text>
+      </TouchableOpacity>
+
+      {/* Sign In Button */}
+      <TouchableOpacity
+        style={styles.signInButton}
+        onPress={handleLogin}
+        disabled={loading}
+      >
+        {loading ? (
+          <ActivityIndicator color={Colors.white} />
+        ) : (
+          <Text style={styles.signInButtonText}>Sign In</Text>
+        )}
+      </TouchableOpacity>
+
+      {/* OR Divider */}
+      <View style={styles.dividerRow}>
+        <View style={styles.dividerLine} />
+        <Text style={styles.dividerText}>OR</Text>
+        <View style={styles.dividerLine} />
+      </View>
+
+      {/* Register Link */}
+      <View style={styles.registerRow}>
+        <Text style={styles.registerText}>Don't have an account? </Text>
+<TouchableOpacity onPress={() => router.push('/(auth)/role-selection' as any)}>        
+  <Text style={styles.registerLink}>Register here</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Apple Button */}
+      <TouchableOpacity style={styles.appleButton}>
+        <Ionicons
+          name="logo-apple"
+          size={28}
+          color="white"
+          style={{ marginRight: 20 }}
+        />
+        <Text style={styles.appleButtonText}>Continue with Apple</Text>
+      </TouchableOpacity>
+
+      {/* Google Button */}
+      <TouchableOpacity style={styles.googleButton}>
+        <FontAwesome
+          name="google"
+          size={30}
+          color="#4285F4"
+          style={{ marginRight: 20 }}
+        />
+        <Text style={styles.googleButtonText}>Continue with Google</Text>
+      </TouchableOpacity>
+
+      {/* Secure Badge */}
+      <View style={styles.secureBadge}>
+        <Text style={styles.secureText}>🔒 Secure & HIPAA Compliant</Text>
+      </View>
+
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  scroll: {
+    flex: 1,
+    backgroundColor: Colors.background,
+  },
+  container: {
+    alignItems: 'center',
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.xxl,
+    paddingBottom: Spacing.xxl,
+  },
+  headerContainer: {
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: Spacing.xl,
+  },
+  line: {
+    width: '65%',
+    height: 5,
+    backgroundColor: Colors.primary,
+    marginVertical: 10,
+    borderRadius: 10,
+  },
+  meraHeading: {
+    fontFamily: 'LibreBaskerville_700Bold',
+    fontSize: 42,
+    color: Colors.textPrimary,
+    letterSpacing: 4,
+  },
+  meraSubtitle: {
+    fontSize: FontSizes.sm,
+    color: Colors.textSecondary,
+    marginTop: 2,
+  },
+  welcomeHeading: {
+    fontFamily: 'LibreBaskerville_700Bold',
+    fontSize: FontSizes.heading,
+    color: Colors.textPrimary,
+    marginBottom: Spacing.xs,
+  },
+  welcomeSubtitle: {
+    fontSize: FontSizes.sm,
+    color: Colors.textSecondary,
+    marginBottom: Spacing.xl,
+  },
+  errorContainer: {
+    width: '100%',
+    backgroundColor: '#3D0000',
+    padding: Spacing.md,
+    borderRadius: BorderRadius.md,
+    marginBottom: Spacing.md,
+    borderLeftWidth: 4,
+    borderLeftColor: Colors.emergency,
+  },
+  errorText: {
+    color: '#FF6B6B',
+    fontSize: FontSizes.sm,
+  },
+  inputContainer: {
+    width: '100%',
+    marginBottom: Spacing.md,
+  },
+  label: {
+    fontSize: FontSizes.xs,
+    color: Colors.textSecondary,
+    marginBottom: Spacing.xs,
+    letterSpacing: 1,
+  },
+  input: {
+    backgroundColor: Colors.surface,
+    color: Colors.textPrimary,
+    padding: Spacing.md,
+    borderRadius: BorderRadius.md,
+    fontSize: FontSizes.md,
+  },
+  passwordRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: BorderRadius.md,
+    paddingRight: Spacing.md,
+  },
+  passwordInput: {
+    flex: 1,
+    color: Colors.textPrimary,
+    padding: Spacing.md,
+    fontSize: FontSizes.md,
+  },
+  showHide: {
+    color: Colors.primary,
+    fontSize: FontSizes.sm,
+  },
+  forgotContainer: {
+    alignSelf: 'flex-end',
+    marginBottom: Spacing.lg,
+  },
+  forgotText: {
+    color: Colors.primary,
+    fontSize: FontSizes.sm,
+  },
+  signInButton: {
+    backgroundColor: Colors.primary,
+    width: '100%',
+    padding: Spacing.md,
+    borderRadius: BorderRadius.full,
+    alignItems: 'center',
+    marginBottom: Spacing.lg,
+  },
+  signInButtonText: {
+    color: Colors.white,
+    fontSize: FontSizes.md,
+    fontWeight: 'bold',
+    fontFamily: 'LibreBaskerville_700Bold',
+  },
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: Spacing.md,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: Colors.surface,
+  },
+  dividerText: {
+    color: Colors.textSecondary,
+    marginHorizontal: Spacing.sm,
+    fontSize: FontSizes.sm,
+  },
+  registerRow: {
+    flexDirection: 'row',
+    marginBottom: Spacing.lg,
+  },
+  registerText: {
+    color: Colors.textSecondary,
+    fontSize: FontSizes.sm,
+  },
+  registerLink: {
+    color: Colors.primary,
+    fontSize: FontSizes.sm,
+    fontWeight: 'bold',
+  },
+  appleButton: {
+    backgroundColor: '#000000',
+    width: '100%',
+    padding: Spacing.md,
+    borderRadius: BorderRadius.md,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginBottom: Spacing.sm,
+  },
+  appleButtonText: {
+    color: Colors.white,
+    fontSize: FontSizes.md,
+    fontWeight: 'bold',
+  },
+  googleButton: {
+    backgroundColor: Colors.white,
+    width: '100%',
+    padding: Spacing.md,
+    borderRadius: BorderRadius.md,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginBottom: Spacing.lg,
+  },
+  googleButtonText: {
+    color: '#000000',
+    fontSize: FontSizes.md,
+  },
+  secureBadge: {
+    marginTop: Spacing.sm,
+  },
+  secureText: {
+    color: Colors.textSecondary,
+    fontSize: FontSizes.xs,
+  },
+});

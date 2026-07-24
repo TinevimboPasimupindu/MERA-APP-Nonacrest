@@ -1,0 +1,186 @@
+
+<style>
+#erd { padding: 1rem 0; }
+#erd svg { width: 100%; height: auto; }
+#erd svg.erDiagram .divider path { stroke-opacity: 0.5; }
+#erd svg.erDiagram .row-rect-odd path,
+#erd svg.erDiagram .row-rect-odd rect,
+#erd svg.erDiagram .row-rect-even path,
+#erd svg.erDiagram .row-rect-even rect { stroke: none !important; }
+</style>
+<div id="erd"></div>
+<script type="module">
+import mermaid from 'https://esm.sh/mermaid@11/dist/mermaid.esm.min.mjs';
+const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+await document.fonts.ready;
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'base',
+  fontFamily: '"Anthropic Sans", sans-serif',
+  themeVariables: {
+    darkMode: dark,
+    fontSize: '13px',
+    fontFamily: '"Anthropic Sans", sans-serif',
+    lineColor: dark ? '#9c9a92' : '#73726c',
+    textColor: dark ? '#c2c0b6' : '#3d3d3a',
+    primaryColor: dark ? '#2a2a28' : '#f5f4f0',
+    primaryBorderColor: dark ? '#5a5955' : '#b4b2a9',
+    attributeBackgroundColorEven: dark ? '#222220' : '#fafaf8',
+    attributeBackgroundColorOdd: dark ? '#2a2a28' : '#f1efea',
+  },
+});
+
+const diagram = `erDiagram
+  USER {
+    uuid id PK
+    string email
+    string role
+    string full_name
+    string phone_number
+    date date_of_birth
+    string facility_name
+    string service_name
+    string institutional_status
+    boolean is_active
+    boolean is_locked
+    int failed_login_attempts
+    boolean is_available
+  }
+
+  INSTITUTIONAL_DOCUMENT {
+    uuid id PK
+    uuid user_id FK
+    string document_type
+    string file
+    datetime uploaded_at
+  }
+
+  PASSWORD_RESET_TOKEN {
+    uuid id PK
+    uuid user_id FK
+    string token
+    datetime expires_at
+    boolean used
+  }
+
+  MEDICAL_PROFILE {
+    uuid id PK
+    uuid patient_id FK
+    uuid verified_by_id FK
+    uuid last_updated_by_id FK
+    string blood_type
+    text chronic_conditions
+    text current_medications
+    text known_allergies
+    text paramedic_notes
+    string verification_status
+    datetime verified_at
+    boolean data_sharing_consent
+    datetime consent_given_at
+  }
+
+  VERIFICATION_REQUEST {
+    uuid id PK
+    uuid patient_id FK
+    uuid hospital_id FK
+    uuid reviewed_by_id FK
+    string status
+    text hospital_note
+    datetime submitted_at
+    datetime reviewed_at
+  }
+
+  EMERGENCY_CONTACT {
+    uuid id PK
+    uuid patient_id FK
+    string full_name
+    string relationship
+    string phone_number
+    int priority_order
+  }
+
+  INCIDENT {
+    uuid id PK
+    uuid patient_id FK
+    uuid ambulance_service_id FK
+    uuid destination_hospital_id FK
+    uuid cancelled_by_id FK
+    string status
+    string priority_level
+    string activation_method
+    decimal latitude
+    decimal longitude
+    datetime triggered_at
+    datetime confirmed_at
+    datetime accepted_at
+    datetime completed_at
+    boolean medical_profile_access_granted
+    boolean was_offline_queued
+    int eta_minutes
+  }
+
+  TREATMENT_NOTE {
+    uuid id PK
+    uuid incident_id FK
+    uuid authored_by_id FK
+    text chief_complaint
+    text treatment_administered
+    string blood_pressure
+    string spo2
+    string heart_rate
+    text medications_given
+    boolean is_draft
+    datetime submitted_at
+  }
+
+  EMERGENCY_LOG {
+    uuid id PK
+    uuid incident_id FK
+    uuid actor_id FK
+    string event_type
+    text description
+    decimal latitude
+    decimal longitude
+    datetime logged_at
+  }
+
+  USER ||--o{ INSTITUTIONAL_DOCUMENT : "uploads"
+  USER ||--o{ PASSWORD_RESET_TOKEN : "requests"
+  USER ||--|| MEDICAL_PROFILE : "has profile"
+  USER ||--o{ VERIFICATION_REQUEST : "patient submits"
+  USER ||--o{ VERIFICATION_REQUEST : "hospital reviews"
+  USER ||--o{ EMERGENCY_CONTACT : "patient owns"
+  USER ||--o{ INCIDENT : "patient triggers"
+  USER ||--o{ INCIDENT : "ambulance accepts"
+  USER ||--o{ INCIDENT : "hospital receives"
+  INCIDENT ||--|| TREATMENT_NOTE : "has notes"
+  INCIDENT ||--o{ EMERGENCY_LOG : "logged in"
+`;
+
+const { svg } = await mermaid.render('erd-svg', diagram);
+document.getElementById('erd').innerHTML = svg;
+
+document.querySelectorAll('#erd svg.erDiagram .node').forEach(node => {
+  const firstPath = node.querySelector('path[d]');
+  if (!firstPath) return;
+  const d = firstPath.getAttribute('d');
+  const nums = d.match(/-?[\d.]+/g)?.map(Number);
+  if (!nums || nums.length < 8) return;
+  const xs = [nums[0], nums[2], nums[4], nums[6]];
+  const ys = [nums[1], nums[3], nums[5], nums[7]];
+  const x = Math.min(...xs), y = Math.min(...ys);
+  const w = Math.max(...xs) - x, h = Math.max(...ys) - y;
+  const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  rect.setAttribute('x', x); rect.setAttribute('y', y);
+  rect.setAttribute('width', w); rect.setAttribute('height', h);
+  rect.setAttribute('rx', '8');
+  for (const a of ['fill', 'stroke', 'stroke-width', 'class', 'style']) {
+    if (firstPath.hasAttribute(a)) rect.setAttribute(a, firstPath.getAttribute(a));
+  }
+  firstPath.replaceWith(rect);
+});
+
+document.querySelectorAll('#erd svg.erDiagram .row-rect-odd path, #erd svg.erDiagram .row-rect-even path').forEach(p => {
+  p.setAttribute('stroke', 'none');
+});
+</script>

@@ -1,0 +1,273 @@
+### Variables (edit these as you go)
+@baseUrl = http://127.0.0.1:8000
+@accessToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzc4ODI3NjU5LCJpYXQiOjE3Nzg3ODQ0NTksImp0aSI6ImVlNjg1MTljMDQxODRiYzA5YmEzYjhkOTFlZDMxZjI1IiwidXNlcl9pZCI6IjJmYjJiNmI4LWZjYjEtNGNjNy04YzlmLTEzZjQ2MTY4Mjc1NiJ9.1BmFcdyMYD-7gySWeH5h3sbBnJdJvSfsc_LfZZWLihc
+@incidentId = fe7022f8-b627-48d4-b69d-b2c785b08155
+@contactId = 96d2a8cd-4a20-44ad-8cbd-6d2d0d7451ea
+@hospitalId = 
+@ambulanceId =
+
+###patient access = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzc4ODI0NjI3LCJpYXQiOjE3Nzg3ODE0MjcsImp0aSI6IjMyMTRhOGVhNTQwNDQzOGZiMjE3MmY2OGZmZTQ4M2YyIiwidXNlcl9pZCI6ImE1NzIwNjVlLTY3YWEtNDU2My1iZWQ2LWRlYzQwYTk1ZDBlYSJ9.DWM-W-Q9Kj3QP18gKVt2-YqLvVRL_TAOFWknlvoI9EE
+###hospital access = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzc4ODI3NjU5LCJpYXQiOjE3Nzg3ODQ0NTksImp0aSI6ImVlNjg1MTljMDQxODRiYzA5YmEzYjhkOTFlZDMxZjI1IiwidXNlcl9pZCI6IjJmYjJiNmI4LWZjYjEtNGNjNy04YzlmLTEzZjQ2MTY4Mjc1NiJ9.1BmFcdyMYD-7gySWeH5h3sbBnJdJvSfsc_LfZZWLihc
+###ambulance access = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzc4ODI3ODg4LCJpYXQiOjE3Nzg3ODQ2ODgsImp0aSI6IjQ1NGMzODAyYTM0ODQ5ZjZhYzBlYWU3YWVmNWFlOTExIiwidXNlcl9pZCI6IjIxY2NhZDg3LTU2MzUtNDVhNS04ZDcyLTRhOTZkOTgwNmZiZCJ9.XT91Q-NeA6636pmpCqLvtwHJgoCA68tvG0bVMBOVIyc
+
+### ─── AUTH ──────────────────────────────────────────────
+
+### 1. Register a Patient
+POST {{baseUrl}}/api/auth/register/patient/
+Content-Type: application/json
+
+{
+  "full_name": "Jane Doe",
+  "email": "patient2@example.com",
+  "phone_number": "+27821234567",
+  "password": "Password123!",
+  "confirm_password": "Password123!",
+  "popi_consent": true,
+  "terms_consent": true
+}
+
+### 2. Login  ← Run this first, copy the "access" token from the response
+POST {{baseUrl}}/api/auth/login/
+Content-Type: application/json
+
+{
+  "email": "patient2@example.com",
+  "password": "Password123!"
+}
+
+### 3. Get My Profile (requires token)
+GET {{baseUrl}}/api/auth/me/
+Authorization: Bearer {{accessToken}}
+
+### 4. Refresh Token
+POST {{baseUrl}}/api/auth/token/refresh/
+Content-Type: application/json
+
+{
+  "refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoicmVmcmVzaCIsImV4cCI6MTc3OTM4NjM0MywiaWF0IjoxNzc4NzgxNTQzLCJqdGkiOiIzZDQ0NzE5MTUxOGQ0ODcxYWEwZDM4NDlhMGY4YzZmOSIsInVzZXJfaWQiOiJhNTcyMDY1ZS02N2FhLTQ1NjMtYmVkNi1kZWM0MGE5NWQwZWEifQ.29Pd2t6muNbjJgxe_e0cAhMIGDnhbl3TDG04wKdbTe4"
+}
+
+### 5. Request Password Reset
+POST {{baseUrl}}/api/auth/password-reset/
+Content-Type: application/json
+
+{
+  "email": "patient2@example.com"
+}
+
+### ─── INSTITUTIONAL REGISTRATION ──────────────────────────
+
+### A1. Register a Hospital
+POST {{baseUrl}}/api/auth/register/hospital/
+Content-Type: application/json
+
+{
+  "facility_name": "Mera General Hospital",
+  "facility_type": "private",
+  "facility_registration_number": "DOH-2024-0042",
+  "official_address": "12 Rivonia Road, Sandton, Johannesburg",
+  "province": "Gauteng",
+  "has_emergency_unit": true,
+  "visiting_hours": "08:00–20:00",
+  "latitude": -26.1076,
+  "longitude": 28.0567,
+  "email": "hospital1@example.com",
+  "admin_contact_name": "Dr. Sarah Molefe",
+  "admin_phone": "+27115551234",
+  "phone_number": "+27115551234",
+  "password": "Password123!",
+  "confirm_password": "Password123!",
+  "terms_consent": true
+}
+
+### A2. Register an Ambulance Service
+POST {{baseUrl}}/api/auth/register/ambulance/
+Content-Type: application/json
+
+{
+  "service_name": "Mera EMS",
+  "service_type": "private",
+  "dispatch_phone": "+27115559876",
+  "dispatch_address": "88 Albertina Sisulu Road, Johannesburg",
+  "operational_areas": ["Sandton", "Rosebank", "Midrand", "Fourways"],
+  "capabilities": ["ALS", "BLS", "ICU Transport"],
+  "number_of_active_ambulances": 5,
+  "preferred_hospitals": ["Mera General Hospital"],
+  "email": "ambulance1@example.com",
+  "admin_contact_name": "Thabo Nkosi",
+  "admin_phone": "+27825550001",
+  "password": "Password123!",
+  "confirm_password": "Password123!",
+  "terms_consent": true
+}
+
+### A-get. List all users to find hospital/ambulance UUIDs
+GET {{baseUrl}}/api/auth/me/
+Authorization: Bearer {{accessToken}}
+
+### A3. Approve Hospital  ← requires Django admin credentials (is_staff=True)
+### Replace {hospitalId} with the UUID returned by /api/auth/me/ after logging in as hospital
+POST {{baseUrl}}/api/auth/admin/institutional/{{hospitalId}}/approve/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{}
+
+### A4. Approve Ambulance  ← same — replace {ambulanceId}
+POST {{baseUrl}}/api/auth/admin/institutional/{{ambulanceId}}/approve/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{}
+
+### A5. Login as Hospital  ← copy "access" token into @accessToken to run tests #19–20
+POST {{baseUrl}}/api/auth/login/
+Content-Type: application/json
+
+{
+  "email": "hospital1@example.com",
+  "password": "Password123!"
+}
+
+### A6. Login as Ambulance  ← copy "access" token into @accessToken to run tests #15–18
+POST {{baseUrl}}/api/auth/login/
+Content-Type: application/json
+
+{
+  "email": "ambulance1@example.com",
+  "password": "Password123!"
+}
+
+### ─── MEDICAL PROFILE ────────────────────────────────────
+
+### 6. Get Medical Profile
+GET {{baseUrl}}/api/medical-profile/me/
+Authorization: Bearer {{accessToken}}
+
+### 7. Update Medical Profile
+PATCH {{baseUrl}}/api/medical-profile/submit/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "blood_type": "O+",
+  "chronic_conditions": "Hypertension",
+  "current_medications": "Metformin 500mg",
+  "known_allergies": "Penicillin",
+  "paramedic_notes": "Patient is hard of hearing.",
+  "data_sharing_consent": true
+}
+
+
+### ─── EMERGENCY CONTACTS ─────────────────────────────────
+
+### 8. List Emergency Contacts
+GET {{baseUrl}}/api/emergency-contacts/
+Authorization: Bearer {{accessToken}}
+
+### 9. Add Emergency Contact
+POST {{baseUrl}}/api/emergency-contacts/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "full_name": "John Doe",
+  "relationship": "spouse",
+  "phone_number": "+27829876543",
+  "priority_order": 1
+}
+
+### 10. Delete Emergency Contact
+DELETE {{baseUrl}}/api/emergency-contacts/{{contactId}}/
+Authorization: Bearer {{accessToken}}
+
+
+### ─── SOS / INCIDENTS ─────────────────────────────────────
+
+### 11. Trigger SOS  ← copy the "id" from the response into @incidentId above
+POST {{baseUrl}}/api/incidents/trigger_sos/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "latitude": -26.2041,
+  "longitude": 28.0473,
+  "location_accuracy_metres": 10.5,
+  "was_offline_queued": false,
+  "priority_level": "high"
+}
+
+### 12. Confirm SOS
+POST {{baseUrl}}/api/incidents/{{incidentId}}/confirm/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "activation_method": "manual"
+}
+
+### 13. Cancel Incident
+POST {{baseUrl}}/api/incidents/{{incidentId}}/cancel/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "reason": "False alarm."
+}
+
+### 14. List My Incidents
+GET {{baseUrl}}/api/incidents/
+Authorization: Bearer {{accessToken}}
+
+
+### ─── AMBULANCE ACTIONS ───────────────────────────────────
+
+### 15. View Active Alerts (login as ambulance user first)
+GET {{baseUrl}}/api/incidents/active_alerts/
+Authorization: Bearer {{accessToken}}
+
+### 16. Accept Incident
+POST {{baseUrl}}/api/incidents/{{incidentId}}/accept/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{}
+
+### 17. Update Status
+POST {{baseUrl}}/api/incidents/{{incidentId}}/update_status/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "status": "on_the_way"
+}
+
+### 18. Submit Treatment Notes
+POST {{baseUrl}}/api/incidents/{{incidentId}}/treatment_notes/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "chief_complaint": "Chest pain",
+  "treatment_administered": "O2 via mask at 15L/min",
+  "blood_pressure": "140/90",
+  "spo2": 94,
+  "heart_rate": 102,
+  "medications_given": "Aspirin 300mg",
+  "additional_notes": "Patient stable.",
+  "is_draft": false
+}
+
+
+### ─── HOSPITAL ACTIONS ────────────────────────────────────
+
+### 19. View Incoming Patients (login as hospital user first)
+GET {{baseUrl}}/api/incidents/incoming_patients/
+Authorization: Bearer {{accessToken}}
+
+### 20. Mark Hospital Ready
+POST {{baseUrl}}/api/incidents/{{incidentId}}/mark_ready/
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{}
