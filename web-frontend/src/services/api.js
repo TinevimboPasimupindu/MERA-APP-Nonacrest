@@ -1,5 +1,5 @@
-const BASE_URL = 'https://mera-backend-b02t.onrender.com/api';
-// For local backend testing, swap to: 'http://localhost:8000/api'
+const BASE_URL = 'http://localhost:8000/api';
+// For local backend testing, swap to: 'http://localhost:8000/api' FOR DEPLOYED WEB USE: 'https://mera-backend-b02t.onrender.com/api'
 
 export const ENDPOINTS = {
   login: '/auth/login/',
@@ -17,16 +17,18 @@ export const ENDPOINTS = {
   stats: '/admin/stats/',
 };
 
-export const saveToken = (token) => {
-  localStorage.setItem('access_token', token);
+export const saveToken = (access, refresh) => {
+  localStorage.setItem('access_token', access);
+  localStorage.setItem('refresh_token', refresh);
 };
 
 export const getToken = () => {
   return localStorage.getItem('access_token');
 };
 
-export const clearToken = () => {
+export const clearTokens = () => {
   localStorage.removeItem('access_token');
+  localStorage.removeItem('refresh_token');
 };
 
 export const apiCall = async (endpoint, method = 'GET', body = null, requiresAuth = true) => {

@@ -20,6 +20,13 @@ class Role(models.TextChoices):
     HOSPITAL = "hospital", "Hospital"
     AMBULANCE_SERVICE = "ambulance_service", "Ambulance Service"
 
+    # New roles — added alongside existing ones while the team finalizes
+    # the full migration plan for hospital/ambulance restructuring.
+    HOSPITAL_ADMIN = "hospital_admin", "Hospital Admin"
+    AMBULANCE_ADMIN = "ambulance_admin", "Ambulance Admin"
+    EMT = "emt", "EMT"
+    MERA_ADMIN = "mera_admin", "MERA Admin"
+
 # Institutional approval state
 
 class InstitutionalStatus(models.TextChoices):
