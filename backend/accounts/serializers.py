@@ -331,6 +331,22 @@ class EMTCreationSerializer(serializers.ModelSerializer):
             **validated_data,
         )
 
+# Ambulance Admin: edit one of their own EMTs
+
+class EMTUpdateSerializer(serializers.ModelSerializer):
+    # Contact-detail edits only. Role is permanent (assigned at creation)
+    # and password changes go through the password-reset flow, not this
+    # endpoint, so neither field is listed here.
+
+    class Meta:
+        model = User
+        fields = ["full_name", "phone_number", "email"]
+
+    def validate_email(self, value):
+        if User.objects.exclude(pk=self.instance.pk).filter(email=value).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return value
+
 # Step 3 — Document upload
 
 class InstitutionalDocumentSerializer(serializers.ModelSerializer):
@@ -361,6 +377,32 @@ class UserSummarySerializer(serializers.ModelSerializer):
             "is_available",      # ambulance only
             "is_locked",
         ]
+        read_only_fields = fields
+
+    def get_display_name(self, obj):
+        return obj.get_display_name()
+
+# MERA Admin: institutions table (hospital_admin + ambulance_admin accounts)
+
+class InstitutionSummarySerializer(serializers.ModelSerializer):
+    display_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "display_name", "role", "email", "institutional_status", "date_joined"]
+        read_only_fields = fields
+
+    def get_display_name(self, obj):
+        return obj.get_display_name()
+
+# MERA Admin: platform-wide account management table (every role)
+
+class AdminUserListSerializer(serializers.ModelSerializer):
+    display_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "display_name", "role", "email", "is_active", "institutional_status", "date_joined"]
         read_only_fields = fields
 
     def get_display_name(self, obj):

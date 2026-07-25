@@ -15,15 +15,19 @@ from rest_framework.viewsets import GenericViewSet
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.permissions import IsAmbulanceService, IsMERAAdmin
-from .models import AMBULANCE_ROLES, HOSPITAL_ROLES, InstitutionalStatus, User
+from emergencies.models import Incident
+from .models import AMBULANCE_ROLES, HOSPITAL_ROLES, InstitutionalStatus, Role, User
 from .serializers import (
+    AdminUserListSerializer,
     AmbulanceAdminCreationSerializer,
     AmbulanceRegistrationSerializer,
     AvailabilityToggleSerializer,
     EMTCreationSerializer,
+    EMTUpdateSerializer,
     HospitalAdminCreationSerializer,
     HospitalRegistrationSerializer,
     InstitutionalDocumentSerializer,
+    InstitutionSummarySerializer,
     PatientRegistrationSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
@@ -354,3 +358,98 @@ class MyEMTsListView(APIView):
     def get(self, request):
         emts = request.user.emts.all()
         return Response(UserSummarySerializer(emts, many=True).data)
+
+
+class EMTUpdateView(APIView):
+    # PATCH  /auth/admin/emts/{id}/ — edit contact details of one of your own EMTs.
+    # DELETE /auth/admin/emts/{id}/ — soft-deactivate one of your own EMTs
+    # (is_active=False, same pattern institutional approval/rejection uses —
+    # see InstitutionalApprovalView. No hard delete anywhere in this codebase;
+    # deactivating preserves incident/treatment-note history tied to the EMT
+    # and can be reversed, unlike a real delete).
+
+    permission_classes = [permissions.IsAuthenticated, IsAmbulanceService]
+
+    def patch(self, request, emt_id):
+        emt = self._get_own_emt(request.user, emt_id)
+        serializer = EMTUpdateSerializer(emt, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(UserSummarySerializer(emt).data)
+
+    def delete(self, request, emt_id):
+        emt = self._get_own_emt(request.user, emt_id)
+        emt.is_active = False
+        emt.save(update_fields=["is_active"])
+        return Response({"detail": f"{emt.get_display_name()} deactivated."})
+
+    def _get_own_emt(self, ambulance_user, emt_id):
+        # 404 (not 403) whether the EMT doesn't exist or just isn't theirs —
+        # same choice verification/views.py and medical_profiles/views.py
+        # make for ownership-scoped lookups, so ownership isn't leaked.
+        from rest_framework.exceptions import NotFound
+        try:
+            return User.objects.get(id=emt_id, role=Role.EMT, ambulance_service=ambulance_user)
+        except User.DoesNotExist:
+            raise NotFound("EMT not found.")
+
+# MERA Admin: institutions table (hospital_admin + ambulance_admin, old + new role names)
+
+class InstitutionsListView(APIView):
+    # GET /auth/admin/institutions/
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def get(self, request):
+        institutions = User.objects.filter(
+            role__in=(HOSPITAL_ROLES | AMBULANCE_ROLES)
+        ).order_by("-date_joined")
+        return Response(InstitutionSummarySerializer(institutions, many=True).data)
+
+# MERA Admin: basic platform stats
+
+class PlatformStatsView(APIView):
+    # GET /auth/admin/stats/
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def get(self, request):
+        return Response({
+            "total_patients": User.objects.filter(role=Role.PATIENT).count(),
+            "total_hospitals": User.objects.filter(role__in=HOSPITAL_ROLES).count(),
+            "total_ambulance_services": User.objects.filter(role__in=AMBULANCE_ROLES).count(),
+            "total_emts": User.objects.filter(role=Role.EMT).count(),
+            "total_incidents": Incident.objects.count(),
+        })
+
+# MERA Admin: platform-wide account management
+
+class AllUsersListView(APIView):
+    # GET /auth/admin/users/ — every account, any role.
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def get(self, request):
+        users = User.objects.all().order_by("-date_joined")
+        return Response(AdminUserListSerializer(users, many=True).data)
+
+
+class DeactivateUserView(APIView):
+    # PATCH /auth/admin/users/{id}/deactivate/ — works for any role,
+    # except a MERA admin may not deactivate their own account (self-lockout guard).
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def patch(self, request, user_id):
+        from rest_framework.exceptions import NotFound
+
+        if str(user_id) == str(request.user.id):
+            return Response(
+                {"detail": "You cannot deactivate your own account."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            raise NotFound("User not found.")
+
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+        return Response({"detail": f"{user.get_display_name()} deactivated."})

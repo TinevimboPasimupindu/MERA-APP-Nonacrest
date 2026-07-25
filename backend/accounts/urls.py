@@ -2,21 +2,26 @@ from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
+    AllUsersListView,
     AmbulanceAdminCreateView,
     AmbulanceRegisterView,
     AvailabilityToggleView,
+    DeactivateUserView,
     EMTCreateView,
+    EMTUpdateView,
     HospitalAdminCreateView,
     HospitalListView,
     HospitalRegisterView,
     InstitutionalApprovalView,
     InstitutionalDocumentUploadView,
+    InstitutionsListView,
     LoginView,
     MeView,
     MyEMTsListView,
     PatientRegisterView,
     PasswordResetConfirmView,
     PasswordResetRequestView,
+    PlatformStatsView,
 )
 
 urlpatterns = [
@@ -54,7 +59,14 @@ urlpatterns = [
     path("admin/create/hospital-admin/",  HospitalAdminCreateView.as_view(),  name="admin-create-hospital-admin"),
     path("admin/create/ambulance-admin/", AmbulanceAdminCreateView.as_view(), name="admin-create-ambulance-admin"),
 
-    # Ambulance Admin: create EMT accounts + list own crew
-    path("admin/create/emt/", EMTCreateView.as_view(), name="admin-create-emt"),
-    path("admin/my-emts/",    MyEMTsListView.as_view(), name="admin-my-emts"),
+    # Ambulance Admin: create EMT accounts + list/edit/deactivate own crew
+    path("admin/create/emt/",      EMTCreateView.as_view(),  name="admin-create-emt"),
+    path("admin/my-emts/",         MyEMTsListView.as_view(), name="admin-my-emts"),
+    path("admin/emts/<uuid:emt_id>/", EMTUpdateView.as_view(), name="admin-emt-update"),
+
+    # MERA Admin: institutions, platform stats, account management
+    path("admin/institutions/",                  InstitutionsListView.as_view(), name="admin-institutions"),
+    path("admin/stats/",                         PlatformStatsView.as_view(),    name="admin-stats"),
+    path("admin/users/",                         AllUsersListView.as_view(),     name="admin-users"),
+    path("admin/users/<uuid:user_id>/deactivate/", DeactivateUserView.as_view(), name="admin-user-deactivate"),
 ]
