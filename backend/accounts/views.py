@@ -14,11 +14,14 @@ from rest_framework.views import APIView
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from accounts.permissions import IsAmbulanceService
-from .models import InstitutionalStatus, User
+from accounts.permissions import IsAmbulanceService, IsMERAAdmin
+from .models import AMBULANCE_ROLES, HOSPITAL_ROLES, InstitutionalStatus, User
 from .serializers import (
+    AmbulanceAdminCreationSerializer,
     AmbulanceRegistrationSerializer,
     AvailabilityToggleSerializer,
+    EMTCreationSerializer,
+    HospitalAdminCreationSerializer,
     HospitalRegistrationSerializer,
     InstitutionalDocumentSerializer,
     PatientRegistrationSerializer,
@@ -98,7 +101,7 @@ class InstitutionalDocumentUploadView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        if request.user.role not in ("hospital", "ambulance_service"):
+        if request.user.role not in (HOSPITAL_ROLES | AMBULANCE_ROLES):
             return Response(
                 {"detail": "Only institutional accounts can upload documents."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -234,15 +237,15 @@ class AvailabilityToggleView(APIView):
 class InstitutionalApprovalView(APIView):
     # POST /auth/admin/approve/{user_id}/
     # POST /auth/admin/reject/{user_id}/
-    # Only accessible by MERA staff (is_staff=True).
+    # Only accessible by MERA admins (role='mera_admin' or is_staff=True).
 
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
 
     def post(self, request, user_id, decision):
         try:
             user = User.objects.get(
                 id=user_id,
-                role__in=["hospital", "ambulance_service"],
+                role__in=(HOSPITAL_ROLES | AMBULANCE_ROLES),
             )
         except User.DoesNotExist:
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -282,8 +285,72 @@ class HospitalListView(APIView):
 
     def get(self, request):
         hospitals = User.objects.filter(
-            role='hospital',
+            role__in=HOSPITAL_ROLES,
             is_active=True,
             institutional_status=InstitutionalStatus.APPROVED,
         ).values('id', 'facility_name', 'facility_type', 'official_address', 'province')
         return Response(list(hospitals))
+
+# MERA Admin: create Hospital Admin / Ambulance Admin accounts
+# These accounts are created top-down by MERA staff during institutional
+# onboarding — no self-registration, no approval queue (MERA already vetted
+# them), so they're created active and APPROVED immediately.
+
+class HospitalAdminCreateView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def post(self, request):
+        serializer = HospitalAdminCreationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response(
+            {
+                "message": f"Hospital admin account created for {user.get_display_name()}.",
+                "user": UserSummarySerializer(user).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AmbulanceAdminCreateView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def post(self, request):
+        serializer = AmbulanceAdminCreationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response(
+            {
+                "message": f"Ambulance admin account created for {user.get_display_name()}.",
+                "user": UserSummarySerializer(user).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+# Ambulance Admin: create EMT accounts under their own service
+# Same top-down pattern as above, one level down the hierarchy: the EMT is
+# automatically linked to whichever ambulance account created them.
+
+class EMTCreateView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsAmbulanceService]
+
+    def post(self, request):
+        serializer = EMTCreationSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response(
+            {
+                "message": f"EMT account created for {user.get_display_name()}.",
+                "user": UserSummarySerializer(user).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class MyEMTsListView(APIView):
+    # GET /auth/admin/my-emts/ — an ambulance_admin's own crew list.
+    permission_classes = [permissions.IsAuthenticated, IsAmbulanceService]
+
+    def get(self, request):
+        emts = request.user.emts.all()
+        return Response(UserSummarySerializer(emts, many=True).data)

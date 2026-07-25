@@ -193,6 +193,144 @@ class AmbulanceRegistrationSerializer(serializers.ModelSerializer):
             **validated_data,
         )
 
+# MERA Admin: create Hospital Admin account (institutional onboarding)
+
+class HospitalAdminCreationSerializer(serializers.ModelSerializer):
+    # Used by MERA admin to create a hospital_admin account directly.
+    # No terms_consent (that's a self-registration artifact) and no
+    # PENDING approval step — MERA already vetted the institution before
+    # creating this account, so it's active and approved immediately.
+
+    password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            "facility_name",
+            "facility_type",
+            "facility_registration_number",
+            "official_address",
+            "province",
+            "has_emergency_unit",
+            "visiting_hours",
+            "latitude",
+            "longitude",
+            "email",
+            "admin_contact_name",
+            "admin_phone",
+            "phone_number",
+            "password",
+            "confirm_password",
+        ]
+
+    def validate_email(self, value):
+        _check_email_unique(value)
+        return value
+
+    def validate(self, data):
+        _validate_passwords(data)
+        return data
+
+    def create(self, validated_data):
+        validated_data.pop("confirm_password")
+
+        return User.objects.create_user(
+            role=Role.HOSPITAL_ADMIN,
+            institutional_status=InstitutionalStatus.APPROVED,
+            is_active=True,
+            **validated_data,
+        )
+
+# MERA Admin: create Ambulance Admin account (institutional onboarding)
+
+class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
+    # Used by MERA admin to create an ambulance_admin account directly.
+    # Same reasoning as HospitalAdminCreationSerializer above.
+
+    password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            "service_name",
+            "service_type",
+            "dispatch_phone",
+            "dispatch_address",
+            "operational_areas",
+            "capabilities",
+            "number_of_active_ambulances",
+            "preferred_hospitals",
+            "email",
+            "admin_contact_name",
+            "admin_phone",
+            "password",
+            "confirm_password",
+        ]
+
+    def validate_email(self, value):
+        _check_email_unique(value)
+        return value
+
+    def validate(self, data):
+        _validate_passwords(data)
+        return data
+
+    def create(self, validated_data):
+        validated_data.pop("confirm_password")
+
+        return User.objects.create_user(
+            role=Role.AMBULANCE_ADMIN,
+            institutional_status=InstitutionalStatus.APPROVED,
+            is_active=True,
+            **validated_data,
+        )
+
+# Ambulance Admin: create EMT account
+
+class EMTCreationSerializer(serializers.ModelSerializer):
+    # Used by an ambulance_admin (or legacy ambulance_service) account to
+    # create an EMT under their own service. No self-registration, no
+    # approval queue — same reasoning as HospitalAdminCreationSerializer
+    # above. The EMT is linked to whichever ambulance account created it via
+    # the `ambulance_service` self-referencing FK, taken from request.user
+    # in the view (passed in through serializer context, not client input —
+    # an ambulance admin can only ever create EMTs under their own service).
+
+    password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            "full_name",
+            "email",
+            "phone_number",
+            "password",
+            "confirm_password",
+        ]
+
+    def validate_email(self, value):
+        _check_email_unique(value)
+        return value
+
+    def validate(self, data):
+        _validate_passwords(data)
+        return data
+
+    def create(self, validated_data):
+        validated_data.pop("confirm_password")
+        ambulance_user = self.context["request"].user
+
+        return User.objects.create_user(
+            role=Role.EMT,
+            institutional_status=InstitutionalStatus.APPROVED,
+            is_active=True,
+            ambulance_service=ambulance_user,
+            **validated_data,
+        )
+
 # Step 3 — Document upload
 
 class InstitutionalDocumentSerializer(serializers.ModelSerializer):

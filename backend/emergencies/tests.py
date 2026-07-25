@@ -33,14 +33,14 @@ def make_ambulance(email="amb@test.com"):
 
 class SOSTriggerTest(TestCase):
 
-    @patch("emergencies.tasks.auto_confirm_sos_task.apply_async")
-    @patch("notifications.services.notify_emergency_contacts")
-    @patch("notifications.services.notify_ambulance_services")
-    def test_verified_patient_can_trigger_sos(self, mock_amb, mock_contacts, mock_task):
+    # No mocks needed here — trigger_sos() only creates the incident and logs;
+    # it doesn't call _notify (that's confirm_sos) and there's no tasks module
+    # to schedule against (Celery was removed for this prototype — see
+    # mera_backend/__init__.py — so auto-confirm-via-background-task isn't built).
+    def test_verified_patient_can_trigger_sos(self):
         patient = make_verified_patient()
         incident = services.trigger_sos(patient, {"latitude": -26.2, "longitude": 28.0, "priority_level": "high"})
         self.assertEqual(incident.status, IncidentStatus.PENDING_CONFIRMATION)
-        mock_task.assert_called_once()
 
     def test_unverified_patient_cannot_trigger_sos(self):
         user = User.objects.create_user(
@@ -53,9 +53,8 @@ class SOSTriggerTest(TestCase):
 class SOSConfirmTest(TestCase):
 
     @patch("emergencies.services._broadcast_ws")
-    @patch("notifications.services.notify_emergency_contacts")
-    @patch("notifications.services.notify_ambulance_services")
-    def test_confirm_transitions_to_active(self, mock_amb, mock_contacts, mock_ws):
+    @patch("emergencies.services._notify")
+    def test_confirm_transitions_to_active(self, mock_notify, mock_ws):
         patient = make_verified_patient()
         incident = Incident.objects.create(
             patient=patient, status=IncidentStatus.PENDING_CONFIRMATION
@@ -63,8 +62,9 @@ class SOSConfirmTest(TestCase):
         services.confirm_sos(incident)
         incident.refresh_from_db()
         self.assertEqual(incident.status, IncidentStatus.ACTIVE)
-        mock_contacts.assert_called_once()
-        mock_amb.assert_called_once()
+        # confirm_sos() calls the shared _notify() stub twice — once for
+        # emergency contacts, once for ambulance services (see services.py).
+        self.assertEqual(mock_notify.call_count, 2)
 
 
 class SOSCancelTest(TestCase):
@@ -92,7 +92,7 @@ class SOSCancelTest(TestCase):
 class AcceptIncidentTest(TestCase):
 
     @patch("emergencies.services._broadcast_ws")
-    @patch("notifications.services.notify_patient_ambulance_accepted")
+    @patch("emergencies.services._notify")
     def test_accept_grants_medical_access(self, mock_notify, mock_ws):
         patient = make_verified_patient()
         ambulance = make_ambulance()
@@ -106,7 +106,7 @@ class AcceptIncidentTest(TestCase):
         self.assertTrue(incident.medical_profile_access_granted)
 
     @patch("emergencies.services._broadcast_ws")
-    @patch("notifications.services.notify_patient_ambulance_accepted")
+    @patch("emergencies.services._notify")
     def test_complete_incident_revokes_medical_access(self, mock_notify, mock_ws):
         """NFR-04: Access revoked on completion."""
         patient = make_verified_patient()

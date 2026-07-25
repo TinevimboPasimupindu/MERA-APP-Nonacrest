@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import InstitutionalDocument, PasswordResetToken, User
+from .models import AMBULANCE_ROLES, HOSPITAL_ROLES, InstitutionalDocument, PasswordResetToken, User
 
 
 class InstitutionalDocumentInline(admin.TabularInline):
@@ -58,7 +58,7 @@ class UserAdmin(BaseUserAdmin):
 
     def approve_institutions(self, request, queryset):
         from django.utils import timezone
-        queryset.filter(role__in=["hospital", "ambulance_service"]).update(
+        queryset.filter(role__in=(HOSPITAL_ROLES | AMBULANCE_ROLES)).update(
             institutional_status="approved",
             is_active=True,
             institutional_status_updated_at=timezone.now(),
@@ -68,7 +68,7 @@ class UserAdmin(BaseUserAdmin):
 
     def reject_institutions(self, request, queryset):
         from django.utils import timezone
-        queryset.filter(role__in=["hospital", "ambulance_service"]).update(
+        queryset.filter(role__in=(HOSPITAL_ROLES | AMBULANCE_ROLES)).update(
             institutional_status="rejected",
             institutional_status_updated_at=timezone.now(),
         )
