@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { apiCall, ENDPOINTS, saveToken } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 import logo from '../../assets/mera-logo.png';
 import bgImage from '../../assets/ambulance-intro.png';
 
@@ -10,6 +11,7 @@ const ROLES = [
 ];
 
 export default function Login() {
+  const { login } = useAuth();
   const [role, setRole] = useState('mera_admin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -36,7 +38,7 @@ export default function Login() {
       }
 
       saveToken(response.access, response.refresh);
-      console.log('Logged in as:', response.user.role);
+      login(response.user);
 
     } catch (err) {
       setError(err.detail || 'Login failed. Check your email and password.');
