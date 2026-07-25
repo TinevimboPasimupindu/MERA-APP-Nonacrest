@@ -4,13 +4,18 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
 from accounts.permissions import IsHospital, IsPatient
+from verification.models import VerificationRequest
 from .models import MedicalProfile
 from .serializers import (
     ConsentSerializer,
     HospitalProfileUpdateSerializer,
     MedicalIntakeFormSerializer,
     MedicalProfileSerializer,
+    PatientListSerializer,
 )
+
+# Filter chips on the hospital Patient List screen (SC-13).
+PATIENT_LIST_STATUSES = {"verified", "pending", "flagged", "info_requested"}
 
 
 class MedicalProfileViewSet(GenericViewSet):
@@ -99,7 +104,41 @@ class MedicalProfileViewSet(GenericViewSet):
         serializer.save()
         return Response(MedicalProfileSerializer(profile).data)
 
-    # Helpers 
+    # Hospital: list/search all patients tied to this hospital, any status (SC-13)
+
+    @action(
+        detail=False, methods=["get"],
+        permission_classes=[permissions.IsAuthenticated, IsHospital],
+    )
+    def patients(self, request):
+        # Same "does this patient belong to this hospital" rule as the
+        # verification queue endpoints, just without the status filter
+        # they apply — see verification/views.py queue()/approved()/flagged().
+        patient_ids = VerificationRequest.objects.filter(
+            hospital=request.user
+        ).values_list("patient_id", flat=True).distinct()
+
+        profiles = MedicalProfile.objects.filter(
+            patient_id__in=patient_ids
+        ).select_related("patient")
+
+        search = request.query_params.get("search")
+        if search:
+            profiles = profiles.filter(patient__full_name__icontains=search)
+
+        status_filter = request.query_params.get("status")
+        if status_filter:
+            if status_filter not in PATIENT_LIST_STATUSES:
+                return Response(
+                    {"detail": f"status must be one of: {', '.join(sorted(PATIENT_LIST_STATUSES))}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            profiles = profiles.filter(verification_status=status_filter)
+
+        profiles = profiles.order_by("patient__full_name")
+        return Response(PatientListSerializer(profiles, many=True).data)
+
+    # Helpers
 
     def _get_own_profile(self, user):
         profile, _ = MedicalProfile.objects.get_or_create(patient=user)

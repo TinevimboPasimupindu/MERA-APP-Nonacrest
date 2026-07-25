@@ -99,6 +99,28 @@ class HospitalProfileUpdateSerializer(serializers.ModelSerializer):
         return instance
 
 
+class PatientListSerializer(serializers.ModelSerializer):
+    # Hospital's Patient List screen (SC-13) — one row per patient, any status.
+    patient_id = serializers.SerializerMethodField()
+    patient_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MedicalProfile
+        fields = [
+            "patient_id",
+            "patient_name",
+            "chronic_conditions",
+            "verification_status",
+        ]
+        read_only_fields = fields
+
+    def get_patient_id(self, obj):
+        return str(obj.patient_id)
+
+    def get_patient_name(self, obj):
+        return obj.patient.get_full_name()
+
+
 class ConsentSerializer(serializers.Serializer):
     #Toggle data sharing consent.
     consent = serializers.BooleanField()
