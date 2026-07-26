@@ -20,6 +20,21 @@ class Role(models.TextChoices):
     HOSPITAL = "hospital", "Hospital"
     AMBULANCE_SERVICE = "ambulance_service", "Ambulance Service"
 
+    # New roles — added alongside existing ones while the team finalizes
+    # the full migration plan for hospital/ambulance restructuring.
+    HOSPITAL_ADMIN = "hospital_admin", "Hospital Admin"
+    AMBULANCE_ADMIN = "ambulance_admin", "Ambulance Admin"
+    EMT = "emt", "EMT"
+    MERA_ADMIN = "mera_admin", "MERA Admin"
+
+
+# Role-group helpers — the team hasn't decided on a hard rename yet
+# (see PROJECT_CONTEXT.md), so old and new role values are treated as
+# equivalent everywhere permission/role checks happen. Use these sets
+# instead of comparing against a single literal role string.
+HOSPITAL_ROLES = {Role.HOSPITAL, Role.HOSPITAL_ADMIN}
+AMBULANCE_ROLES = {Role.AMBULANCE_SERVICE, Role.AMBULANCE_ADMIN}
+
 # Institutional approval state
 
 class InstitutionalStatus(models.TextChoices):
@@ -175,6 +190,21 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Availability toggle for dispatcher
     is_available = models.BooleanField(default=True)
 
+    # EMT-specific fields
+    ambulance_service = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="emts",
+        limit_choices_to={"role__in": AMBULANCE_ROLES},
+        help_text=(
+            "Only populated when role=EMT — the ambulance_admin (or legacy "
+            "ambulance_service) account this EMT works under. "
+            "Access an ambulance admin's crew via `ambulance_admin_user.emts.all()`."
+        ),
+    )
+
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["role"]
 
@@ -196,11 +226,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Name helpers 
 
     def get_full_name(self) -> str:
-        if self.role == Role.PATIENT:
+        if self.role in (Role.PATIENT, Role.EMT):
             return self.full_name.strip() or self.email
-        if self.role == Role.HOSPITAL:
+        if self.role in HOSPITAL_ROLES:
             return self.facility_name.strip() or self.email
-        if self.role == Role.AMBULANCE_SERVICE:
+        if self.role in AMBULANCE_ROLES:
             return self.service_name.strip() or self.email
         return self.email
 
@@ -219,11 +249,15 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     @property
     def is_hospital(self) -> bool:
-        return self.role == Role.HOSPITAL
+        return self.role in HOSPITAL_ROLES
 
     @property
     def is_ambulance_service(self) -> bool:
-        return self.role == Role.AMBULANCE_SERVICE
+        return self.role in AMBULANCE_ROLES
+
+    @property
+    def is_mera_admin(self) -> bool:
+        return self.role == Role.MERA_ADMIN or self.is_staff
 
     @property
     def is_institutional_approved(self) -> bool:

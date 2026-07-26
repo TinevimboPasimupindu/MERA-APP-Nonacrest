@@ -1,5 +1,7 @@
 from rest_framework.permissions import BasePermission
 
+from accounts.models import AMBULANCE_ROLES, HOSPITAL_ROLES
+
 from .models import Incident, IncidentStatus
 
 
@@ -10,7 +12,7 @@ class IsAcceptingAmbulance(BasePermission):
     message = "Access to this incident's medical data is restricted to the accepting ambulance service."
 
     def has_object_permission(self, request, view, obj: Incident):
-        if request.user.role != "ambulance_service":
+        if request.user.role not in AMBULANCE_ROLES:
             return False
         if obj.ambulance_service_id != request.user.id:
             return False
@@ -34,6 +36,6 @@ class IsDestinationHospital(BasePermission):
     message = "Access restricted to the designated receiving hospital."
 
     def has_object_permission(self, request, view, obj: Incident):
-        if request.user.role != "hospital":
+        if request.user.role not in HOSPITAL_ROLES:
             return False
         return obj.destination_hospital_id == request.user.id

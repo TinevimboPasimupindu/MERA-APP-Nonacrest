@@ -4,6 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
+from accounts.models import AMBULANCE_ROLES, HOSPITAL_ROLES
 from accounts.permissions import IsAmbulanceService, IsHospital, IsPatient
 
 from .models import Incident, IncidentStatus, TreatmentNote
@@ -31,11 +32,11 @@ class IncidentViewSet(viewsets.GenericViewSet):
         user = self.request.user
         if user.role == "patient":
             return Incident.objects.filter(patient=user)
-        if user.role == "ambulance_service":
+        if user.role in AMBULANCE_ROLES:
             return Incident.objects.filter(
                 Q(status=IncidentStatus.ACTIVE) | Q(ambulance_service=user)
             )
-        if user.role == "hospital":
+        if user.role in HOSPITAL_ROLES:
             return Incident.objects.filter(destination_hospital=user)
         return Incident.objects.none()
 
@@ -161,7 +162,7 @@ class IncidentViewSet(viewsets.GenericViewSet):
         try:
             hospital_user = User.objects.get(
                 pk=serializer.validated_data["hospital_user_id"],
-                role="hospital",
+                role__in=HOSPITAL_ROLES,
             )
         except User.DoesNotExist:
             raise ValidationError({"hospital_user_id": "Hospital not found."})

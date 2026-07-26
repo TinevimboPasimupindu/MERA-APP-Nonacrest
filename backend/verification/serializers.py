@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from accounts.models import User
+from accounts.models import HOSPITAL_ROLES, User
 from .models import VerificationRequest, VerificationRequestStatus
 
 
@@ -37,7 +37,7 @@ class SubmitVerificationRequestSerializer(serializers.Serializer):
         try:
             hospital = User.objects.get(
                 id=value,
-                role="hospital",
+                role__in=HOSPITAL_ROLES,
                 is_active=True,
                 institutional_status="approved",
             )

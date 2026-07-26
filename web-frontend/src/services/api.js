@@ -1,15 +1,33 @@
-const BASE_URL = 'https://mera-backend-b02t.onrender.com/api';
-// For local backend testing, swap to: 'http://localhost:8000/api'
+const BASE_URL = 'http://localhost:8000/api';
+// For local backend testing, swap to: 'http://localhost:8000/api' FOR DEPLOYED WEB USE: 'https://mera-backend-b02t.onrender.com/api'
 
 export const ENDPOINTS = {
   login: '/auth/login/',
   me: '/auth/me/',
+  refresh: '/auth/token/refresh/',
 
-  // Hospital admin
-  verificationQueue: '/verification/',
+  // Hospital admin — verification queue
+  verificationQueue: '/verification/queue/',
+  verificationApproved: '/verification/approved/',
+  verificationFlagged: '/verification/flagged/',
+  verificationReview: (id) => `/verification/${id}/review/`,
+  verificationAction: (id) => `/verification/${id}/action/`,
+
+  // Hospital admin — patient medical profile
+  patients: '/medical-profile/patients/',
+  patientProfile: (patientId) => `/medical-profile/${patientId}/hospital_view/`,
+  patientProfileEdit: (patientId) => `/medical-profile/${patientId}/hospital_edit/`,
+
+  // Hospital admin — incoming ambulance notifications
+  incomingPatients: '/incidents/incoming_patients/',
+  incidentDetail: (id) => `/incidents/${id}/hospital_detail/`,
+  markIncidentReady: (id) => `/incidents/${id}/mark_ready/`,
 
   // Ambulance admin
-  emts: '/accounts/emts/',
+  createEmt: '/auth/admin/create/emt/',
+  myEmts: '/auth/admin/my-emts/',
+  emtUpdate: (id) => `/auth/admin/emts/${id}/`,
+  myResponses: '/incidents/my_responses/',
 
   // MERA super-admin
   institutions: '/admin/institutions/',
@@ -17,19 +35,52 @@ export const ENDPOINTS = {
   stats: '/admin/stats/',
 };
 
-export const saveToken = (token) => {
-  localStorage.setItem('access_token', token);
+export const saveToken = (access, refresh) => {
+  if (access) localStorage.setItem('access_token', access);
+  if (refresh) localStorage.setItem('refresh_token', refresh);
 };
 
 export const getToken = () => {
   return localStorage.getItem('access_token');
 };
 
-export const clearToken = () => {
-  localStorage.removeItem('access_token');
+export const getRefreshToken = () => {
+  return localStorage.getItem('refresh_token');
 };
 
-export const apiCall = async (endpoint, method = 'GET', body = null, requiresAuth = true) => {
+export const clearTokens = () => {
+  localStorage.removeItem('access_token');
+  localStorage.removeItem('refresh_token');
+};
+
+// Single in-flight refresh so multiple 401s at once don't each fire their
+// own refresh request — they all await the same promise.
+let refreshInFlight = null;
+
+async function refreshAccessToken() {
+  const refresh = getRefreshToken();
+  if (!refresh) throw { status: 401, detail: 'Not authenticated.' };
+
+  if (!refreshInFlight) {
+    refreshInFlight = fetch(`${BASE_URL}${ENDPOINTS.refresh}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh }),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw { status: res.status, detail: 'Session expired.' };
+        const data = await res.json();
+        saveToken(data.access, null);
+        return data.access;
+      })
+      .finally(() => {
+        refreshInFlight = null;
+      });
+  }
+  return refreshInFlight;
+}
+
+export const apiCall = async (endpoint, method = 'GET', body = null, requiresAuth = true, _retry = true) => {
   const headers = {
     'Content-Type': 'application/json',
   };
@@ -44,6 +95,16 @@ export const apiCall = async (endpoint, method = 'GET', body = null, requiresAut
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });
+
+  if (response.status === 401 && requiresAuth && _retry && getRefreshToken()) {
+    try {
+      await refreshAccessToken();
+      return apiCall(endpoint, method, body, requiresAuth, false);
+    } catch {
+      clearTokens();
+      throw { status: 401, detail: 'Your session has expired. Please log in again.' };
+    }
+  }
 
   const text = await response.text();
   let data;
