@@ -7,6 +7,14 @@ export const ENDPOINTS = {
 
   // Hospital admin
   verificationQueue: '/verification/',
+  verification: {
+    queue: '/verification/queue/',
+    approved: '/verification/approved/',
+    flagged: '/verification/flagged/',
+    review: (id) => `/verification/${id}/review/`,
+    action: (id) => `/verification/${id}/action/`,
+  },
+  emts: '/accounts/emts/',
 
   // Ambulance admin
   emts: '/accounts/emts/',
