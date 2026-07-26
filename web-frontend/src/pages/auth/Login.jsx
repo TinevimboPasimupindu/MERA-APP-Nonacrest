@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { apiCall, ENDPOINTS, saveToken } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import logo from '../../assets/mera-logo.png';
@@ -12,6 +13,7 @@ const ROLES = [
 
 export default function Login() {
   const { login } = useAuth();
+  const navigate = useNavigate();
   const [role, setRole] = useState('mera_admin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -39,6 +41,14 @@ export default function Login() {
 
       saveToken(response.access, response.refresh);
       login(response.user);
+
+      if (response.user.role === 'hospital_admin') {
+        navigate('/hospital-admin', { replace: true });
+      } else if (response.user.role === 'ambulance_admin') {
+        navigate('/ambulance-admin', { replace: true });
+      } else {
+        setError('MERA Admin dashboard isn’t built yet — logged in, but there’s nowhere to go.');
+      }
 
     } catch (err) {
       setError(err.detail || 'Login failed. Check your email and password.');

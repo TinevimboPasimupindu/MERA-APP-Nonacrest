@@ -14,6 +14,7 @@ export const ENDPOINTS = {
   verificationAction: (id) => `/verification/${id}/action/`,
 
   // Hospital admin — patient medical profile
+  patients: '/medical-profile/patients/',
   patientProfile: (patientId) => `/medical-profile/${patientId}/hospital_view/`,
   patientProfileEdit: (patientId) => `/medical-profile/${patientId}/hospital_edit/`,
 
@@ -23,7 +24,10 @@ export const ENDPOINTS = {
   markIncidentReady: (id) => `/incidents/${id}/mark_ready/`,
 
   // Ambulance admin
-  emts: '/accounts/emts/',
+  createEmt: '/auth/admin/create/emt/',
+  myEmts: '/auth/admin/my-emts/',
+  emtUpdate: (id) => `/auth/admin/emts/${id}/`,
+  myResponses: '/incidents/my_responses/',
 
   // MERA super-admin
   institutions: '/admin/institutions/',

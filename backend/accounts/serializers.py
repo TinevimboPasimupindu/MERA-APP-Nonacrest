@@ -373,6 +373,8 @@ class UserSummarySerializer(serializers.ModelSerializer):
             "email",
             "role",
             "display_name",
+            "full_name",
+            "phone_number",
             "institutional_status",
             "is_available",      # ambulance only
             "is_locked",
