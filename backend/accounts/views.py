@@ -98,7 +98,7 @@ class InstitutionalDocumentUploadView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        if request.user.role not in ("hospital", "ambulance_service"):
+        if request.user.role not in ("hospital_admin", "ambulance_service"):
             return Response(
                 {"detail": "Only institutional accounts can upload documents."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -159,7 +159,7 @@ class LoginView(APIView):
             )
 
         # PROTOTYPE: approval gate bypassed; reinstate for production
-        # if user.role in ("hospital", "ambulance_service"):
+        # if user.role in ("hospital_admin", "ambulance_service"):
         #     if user.institutional_status == InstitutionalStatus.PENDING:
         #         return Response(
         #             {"detail": "Your account is pending MERA admin approval. You will be notified by email."},
@@ -242,7 +242,7 @@ class InstitutionalApprovalView(APIView):
         try:
             user = User.objects.get(
                 id=user_id,
-                role__in=["hospital", "ambulance_service"],
+                role__in=["hospital_admin", "ambulance_service"],
             )
         except User.DoesNotExist:
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -282,7 +282,7 @@ class HospitalListView(APIView):
 
     def get(self, request):
         hospitals = User.objects.filter(
-            role='hospital',
+            role='hospital_admin',
             is_active=True,
             institutional_status=InstitutionalStatus.APPROVED,
         ).values('id', 'facility_name', 'facility_type', 'official_address', 'province')

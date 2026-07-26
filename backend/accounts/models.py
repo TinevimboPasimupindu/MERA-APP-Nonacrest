@@ -17,7 +17,7 @@ from django.utils import timezone
 
 class Role(models.TextChoices):
     PATIENT = "patient", "Patient"
-    HOSPITAL = "hospital", "Hospital"
+    HOSPITAL = "hospital_admin", "Hospital Admin"
     AMBULANCE_SERVICE = "ambulance_service", "Ambulance Service"
 
 # Institutional approval state

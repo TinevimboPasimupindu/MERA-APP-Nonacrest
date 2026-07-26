@@ -81,7 +81,7 @@ class MedicalProfile(models.Model):
         null=True, blank=True,
         on_delete=models.SET_NULL,
         related_name="profiles_verified",
-        limit_choices_to={"role": "hospital"},
+        limit_choices_to={"role": "hospital_admin"},
     )
 
     # Track hospital edits separately from patient edits 

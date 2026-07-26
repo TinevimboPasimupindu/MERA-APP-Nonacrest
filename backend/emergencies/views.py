@@ -35,7 +35,7 @@ class IncidentViewSet(viewsets.GenericViewSet):
             return Incident.objects.filter(
                 Q(status=IncidentStatus.ACTIVE) | Q(ambulance_service=user)
             )
-        if user.role == "hospital":
+        if user.role == "hospital_admin":
             return Incident.objects.filter(destination_hospital=user)
         return Incident.objects.none()
 
@@ -161,7 +161,7 @@ class IncidentViewSet(viewsets.GenericViewSet):
         try:
             hospital_user = User.objects.get(
                 pk=serializer.validated_data["hospital_user_id"],
-                role="hospital",
+                role="hospital_admin",
             )
         except User.DoesNotExist:
             raise ValidationError({"hospital_user_id": "Hospital not found."})

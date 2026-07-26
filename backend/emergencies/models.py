@@ -83,7 +83,7 @@ class Incident(models.Model):
         blank=True,
         on_delete=models.SET_NULL,
         related_name="incidents_as_destination",
-        limit_choices_to={"role": "hospital"},
+        limit_choices_to={"role": "hospital_admin"},
     )
 
     # Status & priority 

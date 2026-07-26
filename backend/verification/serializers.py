@@ -37,7 +37,7 @@ class SubmitVerificationRequestSerializer(serializers.Serializer):
         try:
             hospital = User.objects.get(
                 id=value,
-                role="hospital",
+                role="hospital_admin",
                 is_active=True,
                 institutional_status="approved",
             )

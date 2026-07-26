@@ -58,7 +58,7 @@ class UserAdmin(BaseUserAdmin):
 
     def approve_institutions(self, request, queryset):
         from django.utils import timezone
-        queryset.filter(role__in=["hospital", "ambulance_service"]).update(
+        queryset.filter(role__in=["hospital_admin", "ambulance_service"]).update(
             institutional_status="approved",
             is_active=True,
             institutional_status_updated_at=timezone.now(),
@@ -68,7 +68,7 @@ class UserAdmin(BaseUserAdmin):
 
     def reject_institutions(self, request, queryset):
         from django.utils import timezone
-        queryset.filter(role__in=["hospital", "ambulance_service"]).update(
+        queryset.filter(role__in=["hospital_admin", "ambulance_service"]).update(
             institutional_status="rejected",
             institutional_status_updated_at=timezone.now(),
         )

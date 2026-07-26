@@ -34,6 +34,6 @@ class IsDestinationHospital(BasePermission):
     message = "Access restricted to the designated receiving hospital."
 
     def has_object_permission(self, request, view, obj: Incident):
-        if request.user.role != "hospital":
+        if request.user.role != "hospital_admin":
             return False
         return obj.destination_hospital_id == request.user.id

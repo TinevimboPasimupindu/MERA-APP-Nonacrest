@@ -26,7 +26,7 @@ class VerificationRequest(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="verification_queue",
-        limit_choices_to={"role": "hospital"},
+        limit_choices_to={"role": "hospital_admin"},
     )
 
     status = models.CharField(

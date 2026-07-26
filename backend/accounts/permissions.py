@@ -17,14 +17,14 @@ class IsPatient(BasePermission):
 
 
 class IsHospital(BasePermission):
-    # Allow access only to users with role='hospital'.
+    # Allow access only to users with role='hospital_admin'.
     message = "This action is restricted to hospital accounts."
 
     def has_permission(self, request, view):
         return bool(
             request.user
             and request.user.is_authenticated
-            and getattr(request.user, "role", None) == "hospital"
+            and getattr(request.user, "role", None) == "hospital_admin"
         )
 
 
