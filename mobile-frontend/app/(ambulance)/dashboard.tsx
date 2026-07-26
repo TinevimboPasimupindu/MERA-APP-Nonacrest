@@ -6,6 +6,7 @@ import {
   ScrollView,
   ActivityIndicator,
   RefreshControl,
+  Alert,
 } from 'react-native';
 
 import { useState, useEffect, useCallback } from 'react';
@@ -19,7 +20,7 @@ import {
 } from '@expo-google-fonts/inter';
 
 import { Colors, Spacing } from '../../constants/theme';
-import { apiCall, ENDPOINTS } from '../../services/api';
+import { apiCall, ENDPOINTS, clearTokens } from '../../services/api';
 
 export default function AmbulanceDashboard() {
   const router = useRouter();
@@ -105,6 +106,24 @@ export default function AmbulanceDashboard() {
     fetchAlerts();
   };
 
+  const handleLogout = () => {
+    Alert.alert(
+      'Log Out',
+      'Are you sure you want to log out of MERA?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Log Out',
+          style: 'destructive',
+          onPress: async () => {
+            await clearTokens();
+            router.replace('/(auth)/login' as any);
+          },
+        },
+      ]
+    );
+  };
+
   const formatTimeAgo = (dateString: string) => {
     const seconds = Math.floor((Date.now() - new Date(dateString).getTime()) / 1000);
     if (seconds < 60) return `${seconds}s ago`;
@@ -121,7 +140,11 @@ export default function AmbulanceDashboard() {
       {/* Sticky Header */}
       <View style={styles.stickyHeader}>
         <View style={styles.topRow}>
-          
+
+          <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+            <Text style={styles.logoutIcon}>🚪</Text>
+          </TouchableOpacity>
+
           <View style={styles.titleBlock}>
             <Text style={styles.serviceName}>
               {user?.display_name || 'Ambulance Service'}
@@ -256,6 +279,17 @@ const styles = StyleSheet.create({
   backArrow: {
     color: Colors.textSecondary,
     fontSize: 22,
+  },
+  logoutButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 999,
+    backgroundColor: '#1A1D35',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoutIcon: {
+    fontSize: 16,
   },
   titleBlock: {
     alignItems: 'center',
