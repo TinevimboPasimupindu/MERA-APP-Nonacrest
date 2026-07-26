@@ -91,16 +91,24 @@ def cancel_incident(incident: Incident, cancelled_by, reason: str = "") -> Incid
     return incident
 
 
-def accept_incident(incident: Incident, ambulance_user) -> Incident:
+def accept_incident(incident: Incident, ambulance_service, actor) -> Incident:
+    # `ambulance_service` is the institution account the incident should be
+    # attributed to — resolved by the caller via User.effective_ambulance_service,
+    # so it's the EMT's ambulance_admin when an EMT accepts, not the EMT
+    # themselves. `actor` is the real user who performed the accept (may be
+    # that same EMT) and is what gets recorded on the audit log.
     with transaction.atomic():
         locked = Incident.objects.select_for_update().get(pk=incident.pk)
         if locked.status != IncidentStatus.ACTIVE:
             raise ValueError("This alert has already been accepted or is no longer active.")
-        locked.accept(ambulance_user=ambulance_user)
-        _log(locked, "ambulance_accepted", actor=ambulance_user)
+        locked.accept(ambulance_user=ambulance_service)
+        _log(locked, "ambulance_accepted", actor=actor)
 
     _notify("Patient %s would be push-notified that ambulance accepted.", locked.patient_id)
-    logger.info("Incident %s accepted by ambulance %s", locked.id, ambulance_user.id)
+    logger.info(
+        "Incident %s accepted by ambulance %s (actor %s)",
+        locked.id, ambulance_service.id, actor.id,
+    )
     return locked
 
 

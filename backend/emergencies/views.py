@@ -4,11 +4,17 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
-from accounts.models import AMBULANCE_ROLES, HOSPITAL_ROLES
-from accounts.permissions import IsAmbulanceService, IsHospital, IsPatient
+from accounts.models import HOSPITAL_ROLES
+from accounts.permissions import IsHospital, IsPatient
 
 from .models import Incident, IncidentStatus, TreatmentNote
-from .permissions import IsAcceptingAmbulance, IsDestinationHospital, IsIncidentPatient
+from .permissions import (
+    AMBULANCE_RESPONDER_ROLES,
+    IsAcceptingAmbulance,
+    IsAmbulanceResponder,
+    IsDestinationHospital,
+    IsIncidentPatient,
+)
 from .serializers import (
     AcceptIncidentSerializer,
     CancelIncidentSerializer,
@@ -32,10 +38,15 @@ class IncidentViewSet(viewsets.GenericViewSet):
         user = self.request.user
         if user.role == "patient":
             return Incident.objects.filter(patient=user)
-        if user.role in AMBULANCE_ROLES:
-            return Incident.objects.filter(
-                Q(status=IncidentStatus.ACTIVE) | Q(ambulance_service=user)
-            )
+        if user.role in AMBULANCE_RESPONDER_ROLES:
+            # For an EMT, effective_ambulance_service resolves to their
+            # ambulance_admin — so an EMT sees the same assigned incidents
+            # their service does, not just ones assigned to their own account.
+            account = user.effective_ambulance_service
+            q = Q(status=IncidentStatus.ACTIVE)
+            if account is not None:
+                q |= Q(ambulance_service=account)
+            return Incident.objects.filter(q)
         if user.role in HOSPITAL_ROLES:
             return Incident.objects.filter(destination_hospital=user)
         return Incident.objects.none()
@@ -110,7 +121,7 @@ class IncidentViewSet(viewsets.GenericViewSet):
 
     # AMBULANCE: Active alert broadcast list
 
-    @action(detail=False, methods=["get"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceService])
+    @action(detail=False, methods=["get"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceResponder])
     def active_alerts(self, request):
         alerts = Incident.objects.filter(
             status=IncidentStatus.ACTIVE,
@@ -122,15 +133,26 @@ class IncidentViewSet(viewsets.GenericViewSet):
 
     # AMBULANCE: Accept alert
 
-    @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceService])
+    @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceResponder])
     def accept(self, request, pk=None):
         try:
             incident = Incident.objects.get(pk=pk)
         except Incident.DoesNotExist:
             return Response({"detail": "Incident not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        # Resolves to request.user's ambulance_admin if they're an EMT,
+        # or request.user themselves otherwise — see User.effective_ambulance_service.
+        ambulance_account = request.user.effective_ambulance_service
+        if ambulance_account is None:
+            return Response(
+                {"detail": "Your account is not linked to an ambulance service."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
-            incident = services.accept_incident(incident, ambulance_user=request.user)
+            incident = services.accept_incident(
+                incident, ambulance_service=ambulance_account, actor=request.user
+            )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
 
@@ -152,7 +174,7 @@ class IncidentViewSet(viewsets.GenericViewSet):
 
     # AMBULANCE: Select hospital
 
-    @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceService])
+    @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceResponder])
     def select_hospital(self, request, pk=None):
         incident = self._get_assigned_incident(pk)
         serializer = SelectHospitalSerializer(data=request.data)
@@ -176,7 +198,7 @@ class IncidentViewSet(viewsets.GenericViewSet):
 
     # AMBULANCE: Update status
 
-    @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceService])
+    @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceResponder])
     def update_status(self, request, pk=None):
         incident = self._get_assigned_incident(pk)
         serializer = UpdateStatusSerializer(data=request.data)
@@ -195,7 +217,7 @@ class IncidentViewSet(viewsets.GenericViewSet):
 
     # AMBULANCE: Treatment notes
 
-    @action(detail=True, methods=["post", "patch"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceService])
+    @action(detail=True, methods=["post", "patch"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceResponder])
     def treatment_notes(self, request, pk=None):
         incident = self._get_assigned_incident(pk)
         serializer = TreatmentNoteSerializer(data=request.data)
@@ -210,10 +232,15 @@ class IncidentViewSet(viewsets.GenericViewSet):
 
     # AMBULANCE: My response history
 
-    @action(detail=False, methods=["get"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceService])
+    @action(detail=False, methods=["get"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceResponder])
     def my_responses(self, request):
+        # Resolves to the EMT's ambulance_admin so this also includes
+        # incidents accepted by any EMT on the same crew, not just this user.
+        account = request.user.effective_ambulance_service
+        if account is None:
+            return Response([])
         incidents = Incident.objects.filter(
-            ambulance_service=request.user
+            ambulance_service=account
         ).order_by("-triggered_at")
         serializer = IncidentAmbulanceActiveSerializer(incidents, many=True)
         return Response(serializer.data)
@@ -288,10 +315,17 @@ class IncidentViewSet(viewsets.GenericViewSet):
             raise NotFound("Incident not found.")
 
     def _get_assigned_incident(self, pk):
+        # Same resolution as get_queryset()/my_responses() — an EMT looking
+        # up "my assigned incident" means "my ambulance_admin's assigned
+        # incident", so this also covers select_hospital/update_status/
+        # treatment_notes, all of which call this helper.
+        from rest_framework.exceptions import NotFound
+        account = self.request.user.effective_ambulance_service
+        if account is None:
+            raise NotFound("Incident not found or not assigned to your service.")
         try:
-            return Incident.objects.get(pk=pk, ambulance_service=self.request.user)
+            return Incident.objects.get(pk=pk, ambulance_service=account)
         except Incident.DoesNotExist:
-            from rest_framework.exceptions import NotFound
             raise NotFound("Incident not found or not assigned to your service.")
 
     def _get_incident_object(self, pk):

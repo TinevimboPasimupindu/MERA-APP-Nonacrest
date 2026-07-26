@@ -43,6 +43,8 @@ export default function LoginScreen() {
         router.replace('/(hospital)/HospitalPortal' as any);
       } else if (role === 'ambulance_service') {
         router.replace('/(ambulance)/dashboard' as any);
+      } else if (role === 'emt') {
+        router.replace('/(ambulance)/dashboard' as any);
       }
     } catch (err: any) {
       setError(err.detail || 'Login failed. Please try again.');

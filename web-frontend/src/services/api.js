@@ -1,5 +1,5 @@
-const BASE_URL = 'http://localhost:8000/api';
-// For local backend testing, swap to: 'http://localhost:8000/api' FOR DEPLOYED WEB USE: 'https://mera-backend-b02t.onrender.com/api'
+const BASE_URL = 'https://mera-app-nonacrest.onrender.com/api';
+// For local backend testing, swap to: 'http://localhost:8000/api' FOR DEPLOYED WEB USE: 'https://mera-app-nonacrest.onrender.com'
 
 export const ENDPOINTS = {
   login: '/auth/login/',
