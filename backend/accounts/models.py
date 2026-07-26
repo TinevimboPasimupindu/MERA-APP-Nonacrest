@@ -256,6 +256,22 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.role in AMBULANCE_ROLES
 
     @property
+    def effective_ambulance_service(self):
+        # The ambulance-service account incident/dispatch actions should be
+        # attributed to when this user acts as an ambulance responder: the
+        # account itself, or — for an EMT — the ambulance_admin they belong
+        # to (self.ambulance_service). Used by emergencies/views.py and
+        # emergencies/permissions.py wherever "does this incident belong to
+        # me" is checked, so an EMT's actions roll up to their service
+        # instead of being attributed to the EMT's own account.
+        # Returns None only if an EMT somehow has no linked ambulance_service
+        # (shouldn't happen — EMT creation always sets it — but callers must
+        # not assume it's always set).
+        if self.role == Role.EMT:
+            return self.ambulance_service
+        return self
+
+    @property
     def is_mera_admin(self) -> bool:
         return self.role == Role.MERA_ADMIN or self.is_staff
 

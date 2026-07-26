@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export const BASE_URL = 'https://mera-backend-b02t.onrender.com/api';
+export const BASE_URL = 'https://mera-app-nonacrest.onrender.com/api';
 
 export const ENDPOINTS = {
   // Auth
