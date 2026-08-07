@@ -7,6 +7,7 @@
 # Institutional accounts start pending
 # Account locked after 5 failed login attempts
 
+from django.db.models import Q
 from rest_framework import permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -18,6 +19,7 @@ from accounts.permissions import IsAmbulanceService, IsMERAAdmin
 from emergencies.models import Incident
 from .models import AMBULANCE_ROLES, HOSPITAL_ROLES, InstitutionalStatus, Role, User
 from .serializers import (
+    AdminUserEditSerializer,
     AdminUserListSerializer,
     AmbulanceAdminCreationSerializer,
     AmbulanceRegistrationSerializer,
@@ -33,6 +35,25 @@ from .serializers import (
     PasswordResetRequestSerializer,
     UserSummarySerializer,
 )
+
+
+def _search_filter(queryset, search: str):
+    # Shared by InstitutionsListView/AllUsersListView for ?search=. Case-
+    # insensitive partial match against every "name" field that could be
+    # populated depending on role (full_name for patient/EMT, facility_name
+    # for hospital roles, service_name for ambulance roles) OR'd with email.
+    # Safe to apply the full field set regardless of which view calls this —
+    # a role's irrelevant name field is just blank and never matches, so
+    # there's no need to branch per role here.
+    search = search.strip()
+    if not search:
+        return queryset
+    return queryset.filter(
+        Q(full_name__icontains=search)
+        | Q(facility_name__icontains=search)
+        | Q(service_name__icontains=search)
+        | Q(email__icontains=search)
+    )
 
 
 def _token_response(user: User) -> dict:
@@ -163,6 +184,17 @@ class LoginView(APIView):
                     "attempts_remaining": remaining,
                 },
                 status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # NOT a prototype bypass (no PROTOTYPE comment guarded this — it was
+        # simply never checked). A deactivated account (any role) must not be
+        # able to log in; otherwise DeactivateUserView/EMTUpdateView.delete()
+        # don't actually do anything real, and the new reactivate endpoint
+        # would have nothing genuine to restore.
+        if not user.is_active:
+            return Response(
+                {"detail": "This account has been deactivated. Contact your administrator."},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         # PROTOTYPE: approval gate bypassed; reinstate for production
@@ -396,44 +428,128 @@ class EMTUpdateView(APIView):
 # MERA Admin: institutions table (hospital_admin + ambulance_admin, old + new role names)
 
 class InstitutionsListView(APIView):
-    # GET /auth/admin/institutions/
+    # GET /auth/admin/institutions/?search=...
     permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
 
     def get(self, request):
         institutions = User.objects.filter(
             role__in=(HOSPITAL_ROLES | AMBULANCE_ROLES)
         ).order_by("-date_joined")
+        institutions = _search_filter(institutions, request.query_params.get("search", ""))
         return Response(InstitutionSummarySerializer(institutions, many=True).data)
 
 # MERA Admin: basic platform stats
 
 class PlatformStatsView(APIView):
     # GET /auth/admin/stats/
+    # The four role-based counts only count is_active=True accounts — this
+    # dashboard means "how many do we currently have", not "how many were
+    # ever created", so a deactivated hospital/ambulance/patient/EMT should
+    # drop out of its count immediately. total_incidents is unaffected: an
+    # Incident has no active/inactive concept of its own.
     permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
 
     def get(self, request):
         return Response({
-            "total_patients": User.objects.filter(role=Role.PATIENT).count(),
-            "total_hospitals": User.objects.filter(role__in=HOSPITAL_ROLES).count(),
-            "total_ambulance_services": User.objects.filter(role__in=AMBULANCE_ROLES).count(),
-            "total_emts": User.objects.filter(role=Role.EMT).count(),
+            "total_patients": User.objects.filter(role=Role.PATIENT, is_active=True).count(),
+            "total_hospitals": User.objects.filter(role__in=HOSPITAL_ROLES, is_active=True).count(),
+            "total_ambulance_services": User.objects.filter(role__in=AMBULANCE_ROLES, is_active=True).count(),
+            "total_emts": User.objects.filter(role=Role.EMT, is_active=True).count(),
             "total_incidents": Incident.objects.count(),
         })
 
 # MERA Admin: platform-wide account management
 
 class AllUsersListView(APIView):
-    # GET /auth/admin/users/ — every account, any role.
+    # GET /auth/admin/users/?search=... — every account, any role.
+    # Active accounts first, then deactivated ones; most-recently-joined
+    # first within each group.
     permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
 
     def get(self, request):
-        users = User.objects.all().order_by("-date_joined")
+        users = User.objects.all().order_by("-is_active", "-date_joined")
+        users = _search_filter(users, request.query_params.get("search", ""))
         return Response(AdminUserListSerializer(users, many=True).data)
+
+
+class AdminUserEditView(APIView):
+    # PATCH /auth/admin/users/{id}/ — MERA admin edits any account's basic
+    # info. Role and password are deliberately not editable here (role is
+    # permanent, password changes go through the password-reset flow).
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def patch(self, request, user_id):
+        from rest_framework.exceptions import NotFound
+
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            raise NotFound("User not found.")
+
+        serializer = AdminUserEditSerializer(user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(AdminUserListSerializer(user).data)
+
+
+class ReactivateUserView(APIView):
+    # PATCH /auth/admin/users/{id}/reactivate/ — the inverse of
+    # DeactivateUserView below. No role restriction, mirroring that view
+    # (which has none either, aside from its self-lockout guard — that guard
+    # has no equivalent here: djangorestframework-simplejwt's
+    # JWTAuthentication.get_user() already re-checks is_active against the DB
+    # on every authenticated request, not just at login, so a deactivated
+    # account's own token already stops working before its next request goes
+    # through. A MERA admin literally cannot be authenticated while their own
+    # account is inactive, so "reactivate yourself" can't arise through the
+    # API — you'd need to already be locked out to attempt it, which is
+    # exactly what prevents the attempt).
+    #
+    # No "already active" guard either, mirroring DeactivateUserView's own
+    # lack of an "already inactive" guard — setting is_active to a value it
+    # may already hold is an idempotent success on both ends, not an error.
+    #
+    # Cascading, mirroring DeactivateUserView: reactivating an ambulance_admin
+    # (or legacy ambulance_service) also reactivates every EMT that's
+    # currently inactive under it. Deactivation cascades specifically so an
+    # admin doesn't have to hunt down and deactivate each EMT individually —
+    # if reactivation didn't mirror that, the admin would be forced right
+    # back into exactly that manual cleanup, just in the other direction.
+    # Hospital admins have no subordinate accounts, so nothing cascades there.
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def patch(self, request, user_id):
+        from rest_framework.exceptions import NotFound
+
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            raise NotFound("User not found.")
+
+        user.is_active = True
+        user.save(update_fields=["is_active"])
+
+        reactivated_emt_count = 0
+        if user.role in AMBULANCE_ROLES:
+            reactivated_emt_count = user.emts.filter(is_active=False).update(is_active=True)
+
+        detail = f"{user.get_display_name()} reactivated."
+        if reactivated_emt_count:
+            detail += f" {reactivated_emt_count} linked EMT account(s) were also reactivated."
+
+        return Response({"detail": detail, "reactivated_emt_count": reactivated_emt_count})
 
 
 class DeactivateUserView(APIView):
     # PATCH /auth/admin/users/{id}/deactivate/ — works for any role,
     # except a MERA admin may not deactivate their own account (self-lockout guard).
+    #
+    # Cascading: deactivating an ambulance_admin (or legacy ambulance_service)
+    # also deactivates every EMT linked to it via the ambulance_service FK —
+    # an EMT's account only makes sense in the context of an active service,
+    # so leaving them active under a deactivated employer would let them keep
+    # responding to incidents on behalf of a service MERA just shut down.
+    # Hospital admins have no subordinate accounts, so nothing cascades there.
     permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
 
     def patch(self, request, user_id):
@@ -452,4 +568,13 @@ class DeactivateUserView(APIView):
 
         user.is_active = False
         user.save(update_fields=["is_active"])
-        return Response({"detail": f"{user.get_display_name()} deactivated."})
+
+        deactivated_emt_count = 0
+        if user.role in AMBULANCE_ROLES:
+            deactivated_emt_count = user.emts.filter(is_active=True).update(is_active=False)
+
+        detail = f"{user.get_display_name()} deactivated."
+        if deactivated_emt_count:
+            detail += f" {deactivated_emt_count} linked EMT account(s) were also deactivated."
+
+        return Response({"detail": detail, "deactivated_emt_count": deactivated_emt_count})
