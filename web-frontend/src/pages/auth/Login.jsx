@@ -46,8 +46,8 @@ export default function Login() {
         navigate('/hospital-admin', { replace: true });
       } else if (response.user.role === 'ambulance_admin') {
         navigate('/ambulance-admin', { replace: true });
-      } else {
-        setError('MERA Admin dashboard isn’t built yet — logged in, but there’s nowhere to go.');
+      } else if (response.user.role === 'mera_admin') {
+        navigate('/mera-admin', { replace: true });
       }
 
     } catch (err) {

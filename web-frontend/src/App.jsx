@@ -4,6 +4,7 @@ import { ToastProvider } from './components/Toast'
 import ProtectedRoute from './components/ProtectedRoute'
 import AmbulanceAdminLayout from './layouts/AmbulanceAdminLayout'
 import HospitalAdminLayout from './layouts/HospitalAdminLayout'
+import MeraAdminLayout from './layouts/MeraAdminLayout'
 import Login from './pages/auth/Login'
 import Dashboard from './pages/hospital-admin/Dashboard'
 import VerificationQueue from './pages/hospital-admin/VerificationQueue'
@@ -14,6 +15,9 @@ import Patients from './pages/hospital-admin/Patients'
 import UpdatePatientRecords from './pages/hospital-admin/UpdatePatientRecords'
 import AmbulanceDashboard from './pages/ambulance-admin/Dashboard'
 import EmtManagement from './pages/ambulance-admin/EmtManagement'
+import MeraDashboard from './pages/mera-admin/Dashboard'
+import Institutions from './pages/mera-admin/Institutions'
+import Users from './pages/mera-admin/Users'
 import './App.css'
 
 function App() {
@@ -50,6 +54,19 @@ function App() {
           >
             <Route index element={<AmbulanceDashboard />} />
             <Route path="emts" element={<EmtManagement />} />
+          </Route>
+
+          <Route
+            path="/mera-admin"
+            element={
+              <ProtectedRoute role="mera_admin">
+                <MeraAdminLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<MeraDashboard />} />
+            <Route path="institutions" element={<Institutions />} />
+            <Route path="users" element={<Users />} />
           </Route>
 
           <Route path="*" element={<Navigate to="/login" replace />} />

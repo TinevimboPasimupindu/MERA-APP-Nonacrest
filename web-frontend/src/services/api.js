@@ -1,4 +1,4 @@
-const BASE_URL = 'https://mera-app-nonacrest.onrender.com/api';
+const BASE_URL = 'http://localhost:8000/api';
 // For local backend testing, swap to: 'http://localhost:8000/api' FOR DEPLOYED WEB USE: 'https://mera-app-nonacrest.onrender.com'
 
 export const ENDPOINTS = {
@@ -30,9 +30,14 @@ export const ENDPOINTS = {
   myResponses: '/incidents/my_responses/',
 
   // MERA super-admin
-  institutions: '/admin/institutions/',
-  users: '/admin/users/',
-  stats: '/admin/stats/',
+  institutions: '/auth/admin/institutions/',
+  users: '/auth/admin/users/',
+  stats: '/auth/admin/stats/',
+  editUser: (id) => `/auth/admin/users/${id}/`,
+  deactivateUser: (id) => `/auth/admin/users/${id}/deactivate/`,
+  reactivateUser: (id) => `/auth/admin/users/${id}/reactivate/`,
+  createHospitalAdmin: '/auth/admin/create/hospital-admin/',
+  createAmbulanceAdmin: '/auth/admin/create/ambulance-admin/',
 };
 
 export const saveToken = (access, refresh) => {

@@ -11,7 +11,15 @@ from datetime import timedelta
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import InstitutionalDocument, InstitutionalStatus, PasswordResetToken, Role, User
+from .models import (
+    AMBULANCE_ROLES,
+    HOSPITAL_ROLES,
+    InstitutionalDocument,
+    InstitutionalStatus,
+    PasswordResetToken,
+    Role,
+    User,
+)
 
 # Shared helpers
 
@@ -24,6 +32,25 @@ def _validate_passwords(data: dict) -> dict:
 def _check_email_unique(email: str) -> None:
     if User.objects.filter(email=email).exists():
         raise serializers.ValidationError({"email": "An account with this email already exists."})
+
+
+def _validate_successor(user_id, role_set, type_label):
+    # Shared by HospitalAdminCreationSerializer/AmbulanceAdminCreationSerializer
+    # for the optional `successor_of` reassignment field (see those classes).
+    # Returns the resolved old account, or raises a field-level ValidationError.
+    try:
+        old_account = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        raise serializers.ValidationError({"successor_of": "That account does not exist."})
+    if old_account.role not in role_set:
+        raise serializers.ValidationError(
+            {"successor_of": f"That account is not a {type_label} account."}
+        )
+    if old_account.is_active:
+        raise serializers.ValidationError(
+            {"successor_of": "That account must be deactivated before a successor can take it over."}
+        )
+    return old_account
 
 # Patient registration
 
@@ -195,14 +222,46 @@ class AmbulanceRegistrationSerializer(serializers.ModelSerializer):
 
 # MERA Admin: create Hospital Admin account (institutional onboarding)
 
+# Institution-identity fields — copied verbatim from the old account onto the
+# new one when `successor_of` is used (see HospitalAdminCreationSerializer
+# below). Deliberately excludes email/admin_contact_name/admin_phone/
+# phone_number/password — those belong to the new admin as a person, not to
+# the institution, and are never inherited from whoever ran it before.
+HOSPITAL_IDENTITY_FIELDS = [
+    "facility_name",
+    "facility_type",
+    "facility_registration_number",
+    "official_address",
+    "province",
+    "has_emergency_unit",
+    "visiting_hours",
+    "latitude",
+    "longitude",
+]
+
+
 class HospitalAdminCreationSerializer(serializers.ModelSerializer):
     # Used by MERA admin to create a hospital_admin account directly.
     # No terms_consent (that's a self-registration artifact) and no
     # PENDING approval step — MERA already vetted the institution before
     # creating this account, so it's active and approved immediately.
+    #
+    # Optional `successor_of`: the id of an existing, DEACTIVATED
+    # hospital/hospital_admin account this new account is taking over for
+    # (e.g. the previous admin left and MERA is onboarding a replacement for
+    # the same physical hospital). When given, HOSPITAL_IDENTITY_FIELDS are
+    # copied from that old account onto this one — any values for those
+    # specific fields in this request are ignored in favor of the old
+    # account's, since the whole point is continuity of the institution's
+    # identity. The old account itself is left exactly as it was (still
+    # deactivated, still in the database) — historical records referencing
+    # it (Incidents, VerificationRequests) are never touched. Hospitals have
+    # no subordinate accounts, so unlike the ambulance version of this field,
+    # there's nothing else to re-link.
 
     password = serializers.CharField(write_only=True, min_length=8)
     confirm_password = serializers.CharField(write_only=True)
+    successor_of = serializers.UUIDField(required=False, allow_null=True, write_only=True)
 
     class Meta:
         model = User
@@ -222,6 +281,7 @@ class HospitalAdminCreationSerializer(serializers.ModelSerializer):
             "phone_number",
             "password",
             "confirm_password",
+            "successor_of",
         ]
 
     def validate_email(self, value):
@@ -230,10 +290,18 @@ class HospitalAdminCreationSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         _validate_passwords(data)
+        if data.get("successor_of"):
+            data["_old_account"] = _validate_successor(data["successor_of"], HOSPITAL_ROLES, "hospital")
         return data
 
     def create(self, validated_data):
         validated_data.pop("confirm_password")
+        validated_data.pop("successor_of", None)
+        old_account = validated_data.pop("_old_account", None)
+
+        if old_account:
+            for field in HOSPITAL_IDENTITY_FIELDS:
+                validated_data[field] = getattr(old_account, field)
 
         return User.objects.create_user(
             role=Role.HOSPITAL_ADMIN,
@@ -244,12 +312,41 @@ class HospitalAdminCreationSerializer(serializers.ModelSerializer):
 
 # MERA Admin: create Ambulance Admin account (institutional onboarding)
 
+# See HOSPITAL_IDENTITY_FIELDS above for the reasoning — same idea, ambulance
+# side. dispatch_phone/dispatch_address are the *service's* line/address
+# (institution-level), not the admin's personal contact info, so they belong
+# here, not with admin_contact_name/admin_phone.
+AMBULANCE_IDENTITY_FIELDS = [
+    "service_name",
+    "service_type",
+    "dispatch_phone",
+    "dispatch_address",
+    "operational_areas",
+    "capabilities",
+    "number_of_active_ambulances",
+    "preferred_hospitals",
+]
+
+
 class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
     # Used by MERA admin to create an ambulance_admin account directly.
     # Same reasoning as HospitalAdminCreationSerializer above.
+    #
+    # Optional `successor_of`: same idea as the hospital version, but
+    # ambulance services have subordinate EMT accounts — so on top of
+    # copying AMBULANCE_IDENTITY_FIELDS from the old account, every EMT
+    # currently linked to the old account's `ambulance_service` FK is
+    # re-pointed at this new account AND reactivated (is_active=True) in the
+    # same update — that's the actual point of reassignment: this new admin
+    # can use these EMTs again, not just "they technically point at the
+    # right account but still can't log in until someone remembers to run a
+    # second step." See ReactivateUserView for the standalone version of
+    # this same reasoning. Historical Incidents/VerificationRequests still
+    # pointing at the old account are never touched.
 
     password = serializers.CharField(write_only=True, min_length=8)
     confirm_password = serializers.CharField(write_only=True)
+    successor_of = serializers.UUIDField(required=False, allow_null=True, write_only=True)
 
     class Meta:
         model = User
@@ -267,6 +364,7 @@ class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
             "admin_phone",
             "password",
             "confirm_password",
+            "successor_of",
         ]
 
     def validate_email(self, value):
@@ -275,17 +373,32 @@ class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         _validate_passwords(data)
+        if data.get("successor_of"):
+            data["_old_account"] = _validate_successor(data["successor_of"], AMBULANCE_ROLES, "ambulance")
         return data
 
     def create(self, validated_data):
         validated_data.pop("confirm_password")
+        validated_data.pop("successor_of", None)
+        old_account = validated_data.pop("_old_account", None)
 
-        return User.objects.create_user(
+        if old_account:
+            for field in AMBULANCE_IDENTITY_FIELDS:
+                validated_data[field] = getattr(old_account, field)
+
+        new_user = User.objects.create_user(
             role=Role.AMBULANCE_ADMIN,
             institutional_status=InstitutionalStatus.APPROVED,
             is_active=True,
             **validated_data,
         )
+
+        if old_account:
+            User.objects.filter(ambulance_service=old_account, role=Role.EMT).update(
+                ambulance_service=new_user, is_active=True,
+            )
+
+        return new_user
 
 # Ambulance Admin: create EMT account
 
@@ -387,24 +500,66 @@ class UserSummarySerializer(serializers.ModelSerializer):
 # MERA Admin: institutions table (hospital_admin + ambulance_admin accounts)
 
 class InstitutionSummarySerializer(serializers.ModelSerializer):
-    display_name = serializers.SerializerMethodField()
+    # is_active added alongside institutional_status (a different field —
+    # approved/pending/rejected vs. active/deactivated) so the web
+    # frontend's shared row-actions menu can tell whether an institution is
+    # currently deactivated and show "Reactivate" instead of "Deactivate"
+    # accordingly. Without it, every row looked active regardless of its
+    # real state.
 
-    class Meta:
-        model = User
-        fields = ["id", "display_name", "role", "email", "institutional_status", "date_joined"]
-        read_only_fields = fields
-
-    def get_display_name(self, obj):
-        return obj.get_display_name()
-
-# MERA Admin: platform-wide account management table (every role)
-
-class AdminUserListSerializer(serializers.ModelSerializer):
     display_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = ["id", "display_name", "role", "email", "is_active", "institutional_status", "date_joined"]
+        read_only_fields = fields
+
+    def get_display_name(self, obj):
+        return obj.get_display_name()
+
+# MERA Admin: edit any user's basic info
+
+class AdminUserEditSerializer(serializers.ModelSerializer):
+    # PATCH /auth/admin/users/{id}/ — MERA admin editing any account's basic
+    # contact/identity info. Deliberately excludes role (permanent after
+    # creation everywhere else in this codebase too) and password (goes
+    # through the password-reset flow instead). facility_name/service_name
+    # are included alongside the patient/EMT-style fields since a single
+    # User row holds every role's fields regardless of which role it
+    # actually is (see the model's own comment on this) — whichever of these
+    # is relevant to the account being edited is the caller's concern, same
+    # as EMTUpdateSerializer already does one level down for ambulance admins.
+
+    class Meta:
+        model = User
+        fields = ["full_name", "email", "phone_number", "facility_name", "service_name"]
+
+    def validate_email(self, value):
+        if User.objects.exclude(pk=self.instance.pk).filter(email=value).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return value
+
+# MERA Admin: platform-wide account management table (every role)
+
+class AdminUserListSerializer(serializers.ModelSerializer):
+    # display_name is a computed fallback (facility_name.strip() or email,
+    # etc. — see User.get_full_name()), NOT the same thing as the raw name
+    # field. The web frontend's Edit-user modal (AdminUserEditSerializer)
+    # needs the actual full_name/facility_name/service_name/phone_number
+    # values to safely prefill its form — prefilling from display_name alone
+    # risks silently writing an email address into facility_name (whenever
+    # the real field was blank and display_name fell back to email) or
+    # blanking phone_number entirely (never exposed here before, so the
+    # frontend had no way to know the current value before overwriting it).
+
+    display_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id", "display_name", "role", "email", "is_active", "institutional_status", "date_joined",
+            "full_name", "phone_number", "facility_name", "service_name",
+        ]
         read_only_fields = fields
 
     def get_display_name(self, obj):

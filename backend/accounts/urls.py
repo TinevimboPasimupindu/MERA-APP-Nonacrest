@@ -2,6 +2,7 @@ from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
+    AdminUserEditView,
     AllUsersListView,
     AmbulanceAdminCreateView,
     AmbulanceRegisterView,
@@ -22,6 +23,7 @@ from .views import (
     PasswordResetConfirmView,
     PasswordResetRequestView,
     PlatformStatsView,
+    ReactivateUserView,
 )
 
 urlpatterns = [
@@ -68,5 +70,7 @@ urlpatterns = [
     path("admin/institutions/",                  InstitutionsListView.as_view(), name="admin-institutions"),
     path("admin/stats/",                         PlatformStatsView.as_view(),    name="admin-stats"),
     path("admin/users/",                         AllUsersListView.as_view(),     name="admin-users"),
+    path("admin/users/<uuid:user_id>/",             AdminUserEditView.as_view(),  name="admin-user-edit"),
     path("admin/users/<uuid:user_id>/deactivate/", DeactivateUserView.as_view(), name="admin-user-deactivate"),
+    path("admin/users/<uuid:user_id>/reactivate/", ReactivateUserView.as_view(), name="admin-user-reactivate"),
 ]
