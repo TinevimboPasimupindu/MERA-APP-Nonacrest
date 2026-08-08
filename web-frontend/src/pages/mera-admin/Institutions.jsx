@@ -302,7 +302,15 @@ export default function Institutions() {
                   <td style={{ ...tdStyle, fontWeight: 600 }}>{inst.display_name || '—'}</td>
                   <td style={tdStyle}>{ROLE_LABELS[inst.role] || inst.role}</td>
                   <td style={{ ...tdStyle, fontSize: 12.5 }}>{inst.email || '—'}</td>
-                  <td style={tdStyle}><StatusBadge status={inst.institutional_status} /></td>
+                  {/* is_active, not institutional_status — deactivate/reactivate only ever
+                      touch is_active. institutional_status (approved/pending/rejected) is a
+                      separate concept (MERA's approval of the institution's registration
+                      paperwork) that's currently hardcoded to "approved" for every account
+                      in this prototype (see "Prototype safety bypasses" #1 in
+                      PROJECT_CONTEXT.md) — showing it here would just be an identical badge
+                      on every row. Revisit adding it back once that bypass is reinstated
+                      and institutional_status can actually vary again. */}
+                  <td style={tdStyle}><StatusBadge status={inst.is_active === false ? 'inactive' : 'active'} /></td>
                   <td style={{ ...tdStyle, fontSize: 12.5, color: COLORS.inkMuted }}>{formatWhen(inst.date_joined)}</td>
                   <td style={tdStyle}>
                     <UserRowActions user={inst} onChanged={(patch) => patchInstitution(inst.id, patch)} />
