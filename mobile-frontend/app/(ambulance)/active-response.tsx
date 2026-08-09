@@ -113,6 +113,27 @@ export default function ActiveResponse() {
       try {
         const data = await apiCall(`/incidents/${incidentId}/medical_detail/`, 'GET', undefined, true);
         setIncident(data);
+
+        // This screen isn't only ever reached fresh off an "accept" (where
+        // starting the local status tracker at 'waiting' is correct) — it
+        // can now also be reached directly (history tap-through, session
+        // restore) for an incident that's already progressed further.
+        // Sync the local tracker from what the backend actually reports
+        // instead of always assuming the EMT hasn't sent any status update
+        // yet, which used to leave the On the Way / Arrived buttons showing
+        // as not-yet-pressed even when they already had been.
+        if (data.status === 'on_the_way' || data.status === 'arrived_on_scene') {
+          setStatus(data.status);
+        }
+
+        // An already-completed/cancelled incident has nothing live left to
+        // show — same defensive redirect the patient-side screen already
+        // does for the same reason (reachable via history/session-restore
+        // with an id whose state may have moved on since).
+        if (data.status === 'completed' || data.status === 'cancelled') {
+          router.replace('/(ambulance)/dashboard' as any);
+          return;
+        }
       } catch (err) {
         console.log('Error fetching incident:', err);
       } finally {

@@ -24,6 +24,7 @@ export default function AmbulanceHistory() {
   const router = useRouter();
   const [incidents, setIncidents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -72,6 +73,9 @@ export default function AmbulanceHistory() {
     };
     return map[status] || status;
   };
+
+  const isResolved = (status: string) =>
+    status === 'completed' || status === 'cancelled';
 
   if (!fontsLoaded) return null;
 
@@ -125,45 +129,82 @@ export default function AmbulanceHistory() {
             <Text style={styles.emptyText}>No emergency history yet</Text>
           </View>
         ) : (
-          incidents.map((incident) => (
-            <View key={incident.id} style={styles.incidentCard}>
-              <View style={styles.cardHeader}>
-                <Text style={styles.incidentDate}>
-                  {formatDate(incident.triggered_at)}
-                </Text>
-                <View style={[styles.statusBadge, { backgroundColor: getStatusColor(incident.status) + '22' }]}>
-                  <Text style={[styles.statusText, { color: getStatusColor(incident.status) }]}>
-                    {getStatusLabel(incident.status)}
+          incidents.map((incident) => {
+            const resolved = isResolved(incident.status);
+            const isExpanded = expanded === incident.id;
+
+            // Same reasoning as emergency-history.tsx on the patient side:
+            // a non-terminal incident is tappable straight into its live
+            // tracking screen (active-response.tsx) — this, plus the
+            // app-launch/login session-restore redirect, are the only two
+            // ways to reach that screen for an existing incident. Terminal
+            // incidents have nothing live to show, so they keep expanding
+            // in place instead, same as the patient side.
+            const handlePress = () => {
+              if (resolved) {
+                setExpanded(isExpanded ? null : incident.id);
+              } else {
+                router.push({
+                  pathname: '/(ambulance)/active-response' as any,
+                  params: { incidentId: incident.id },
+                });
+              }
+            };
+
+            return (
+              <TouchableOpacity
+                key={incident.id}
+                style={styles.incidentCard}
+                onPress={handlePress}
+                activeOpacity={0.85}
+              >
+                <View style={styles.cardHeader}>
+                  <Text style={styles.incidentDate}>
+                    {formatDate(incident.triggered_at)}
                   </Text>
+                  <View style={[styles.statusBadge, { backgroundColor: getStatusColor(incident.status) + '22' }]}>
+                    <Text style={[styles.statusText, { color: getStatusColor(incident.status) }]}>
+                      {getStatusLabel(incident.status)}
+                    </Text>
+                  </View>
                 </View>
-              </View>
 
-              <Text style={styles.incidentPriority}>
-                {incident.priority_level?.toUpperCase() || 'HIGH'} Priority Emergency
-              </Text>
+                <Text style={styles.incidentPriority}>
+                  {incident.priority_level?.toUpperCase() || 'HIGH'} Priority Emergency
+                </Text>
 
-              <Text style={styles.incidentMeta}>
-                📍 {incident.latitude
-                  ? `${parseFloat(incident.latitude).toFixed(4)}, ${parseFloat(incident.longitude).toFixed(4)}`
-                  : 'Location not available'}
-              </Text>
-
-              {incident.destination_hospital && (
                 <Text style={styles.incidentMeta}>
-                  🏥 Transported to hospital
+                  📍 {incident.latitude
+                    ? `${parseFloat(incident.latitude).toFixed(4)}, ${parseFloat(incident.longitude).toFixed(4)}`
+                    : 'Location not available'}
                 </Text>
-              )}
 
-              {incident.treatment_note && (
-                <View style={styles.notesCard}>
-                  <Text style={styles.notesLabel}>TREATMENT NOTES</Text>
-                  <Text style={styles.notesText}>
-                    {incident.treatment_note.chief_complaint || 'No notes submitted'}
+                {incident.destination_hospital && (
+                  <Text style={styles.incidentMeta}>
+                    🏥 Transported to hospital
                   </Text>
-                </View>
-              )}
-            </View>
-          ))
+                )}
+
+                {incident.treatment_note && (
+                  <View style={styles.notesCard}>
+                    <Text style={styles.notesLabel}>TREATMENT NOTES</Text>
+                    <Text
+                      style={styles.notesText}
+                      numberOfLines={resolved && !isExpanded ? 2 : undefined}
+                    >
+                      {incident.treatment_note.chief_complaint || 'No notes submitted'}
+                    </Text>
+                  </View>
+                )}
+
+                <Text style={styles.expandHint}>
+                  {resolved
+                    ? (isExpanded ? 'Tap to collapse ▲' : 'Tap to expand ▼')
+                    : 'Tap to view live response →'}
+                </Text>
+              </TouchableOpacity>
+            );
+          })
         )}
 
         <View style={{ height: 40 }} />
@@ -296,5 +337,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: Colors.textPrimary,
     lineHeight: 20,
+  },
+  expandHint: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 12,
+    color: Colors.primary,
+    textAlign: 'right',
+    marginTop: 10,
   },
 });

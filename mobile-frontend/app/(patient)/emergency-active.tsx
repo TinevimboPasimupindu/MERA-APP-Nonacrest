@@ -171,10 +171,19 @@ export default function EmergencyActiveScreen() {
                   true
                 );
               }
-            } catch (err) {
+              router.replace('/(patient)/patient-dashboard' as any);
+            } catch (err: any) {
+              // Cancellation is only allowed before an ambulance is
+              // dispatched (backend-enforced) — a failure here means the
+              // emergency is still genuinely active, so stay on this
+              // screen and say so rather than navigating away as if it
+              // had been cancelled when it hasn't been.
               console.log('Cancel error:', err);
+              Alert.alert(
+                'Could Not Cancel',
+                err.detail || 'This emergency could not be cancelled — it may already have an ambulance on the way.'
+              );
             }
-            router.replace('/(patient)/patient-dashboard' as any);
           },
         },
       ]

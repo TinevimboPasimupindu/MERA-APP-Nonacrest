@@ -139,11 +139,30 @@ export default function EmergencyHistoryScreen() {
             const resolved = isResolved(h.status);
             const statusLabel = getStatusLabel(h.status);
 
+            // A non-terminal incident (anything except completed/cancelled)
+            // has a live tracking screen worth reaching — tapping it
+            // navigates there instead of expanding in place. This is one
+            // of the only two paths (alongside the app-launch/login
+            // session-restore redirect) into emergency-active.tsx for an
+            // existing incident; see PROJECT_CONTEXT.md for why that
+            // matters (a real dispatched incident was otherwise
+            // unreachable once the auto-redirect didn't fire).
+            const handlePress = () => {
+              if (resolved) {
+                setExpanded(isExpanded ? null : h.id);
+              } else {
+                router.push({
+                  pathname: '/(patient)/emergency-active' as any,
+                  params: { incidentId: h.id },
+                });
+              }
+            };
+
             return (
               <TouchableOpacity
                 key={h.id}
                 style={styles.historyCard}
-                onPress={() => setExpanded(isExpanded ? null : h.id)}
+                onPress={handlePress}
                 activeOpacity={0.85}
               >
                 {/* Status badge */}
@@ -176,7 +195,7 @@ export default function EmergencyHistoryScreen() {
 
                 <Text
                   style={styles.historyNotes}
-                  numberOfLines={isExpanded ? undefined : 2}
+                  numberOfLines={resolved && !isExpanded ? 2 : undefined}
                 >
                   {h.treatment_note
                     ? h.treatment_note.chief_complaint || 'No treatment notes yet.'
@@ -184,7 +203,9 @@ export default function EmergencyHistoryScreen() {
                 </Text>
 
                 <Text style={styles.expandHint}>
-                  {isExpanded ? 'Tap to collapse ▲' : 'Tap to expand ▼'}
+                  {resolved
+                    ? (isExpanded ? 'Tap to collapse ▲' : 'Tap to expand ▼')
+                    : 'Tap to view live tracking →'}
                 </Text>
               </TouchableOpacity>
             );
