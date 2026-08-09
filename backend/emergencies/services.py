@@ -5,6 +5,8 @@ WebSocket broadcast is a no-op (no Channels/Redis needed).
 """
 import logging
 
+import httpx
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -17,6 +19,8 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+GOOGLE_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 
 
 def _log(incident, event_type, description="", actor=None, lat=None, lng=None):
@@ -119,6 +123,75 @@ def select_destination_hospital(incident: Incident, hospital_user, eta_minutes: 
     _log(incident, "hospital_notified", description=f"ETA: {eta_minutes} min")
     _notify("Hospital %s would be push-notified (ETA %d min).", hospital_user.id, eta_minutes)
     return incident
+
+
+def update_ambulance_location(incident: Incident, lat: float, lng: float) -> Incident:
+    # Live GPS ping from the responding EMT/ambulance — expected to arrive
+    # frequently (every few seconds) while en route, so deliberately NOT
+    # written to EmergencyLog the way accept/status-change events are;
+    # that log is for meaningful state transitions, and logging every ping
+    # would spam it. incident.updated_at still moves, which is enough for
+    # anything that just needs "was this incident touched recently."
+    incident.ambulance_lat = lat
+    incident.ambulance_lng = lng
+    incident.save(update_fields=["ambulance_lat", "ambulance_lng", "updated_at"])
+    return incident
+
+
+def get_route(origin_lat: float, origin_lng: float, dest_lat: float, dest_lng: float) -> dict:
+    # Server-side-only call to Google's Routes API (computeRoutes). The API
+    # key never leaves the backend — see GOOGLE_MAPS_API_KEY in settings.py,
+    # same pattern as ANTHROPIC_API_KEY for the chatbot.
+    #
+    # X-Goog-FieldMask deliberately requests ONLY Basic-tier fields
+    # (duration, distanceMeters, polyline). Adding traffic-aware fields
+    # (e.g. routeTravelAdvisory) or advanced routing options would bump
+    # this call into Google's more expensive Advanced tier — don't add
+    # fields here without checking which pricing tier they fall under.
+    #
+    # Raises RuntimeError on any failure (missing key, no route found) or
+    # propagates httpx's own exceptions (network error, non-2xx response);
+    # callers are expected to catch broadly and turn this into a 503,
+    # mirroring chatbot/views.py's handling of Anthropic API failures.
+    api_key = settings.GOOGLE_MAPS_API_KEY
+    if not api_key:
+        raise RuntimeError("GOOGLE_MAPS_API_KEY is not configured.")
+
+    payload = {
+        "origin": {"location": {"latLng": {"latitude": origin_lat, "longitude": origin_lng}}},
+        "destination": {"location": {"latLng": {"latitude": dest_lat, "longitude": dest_lng}}},
+        "travelMode": "DRIVE",
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline",
+    }
+
+    response = httpx.post(GOOGLE_ROUTES_URL, json=payload, headers=headers, timeout=10.0)
+    response.raise_for_status()
+    data = response.json()
+
+    routes = data.get("routes") or []
+    if not routes:
+        raise RuntimeError("Google Routes API returned no route.")
+
+    route = routes[0]
+    return {
+        "distance_meters": route.get("distanceMeters"),
+        "duration_seconds": _parse_duration_seconds(route.get("duration")),
+        "polyline": (route.get("polyline") or {}).get("encodedPolyline"),
+    }
+
+
+def _parse_duration_seconds(duration_str):
+    # Google returns route duration as a string like "1234s".
+    if not duration_str:
+        return None
+    try:
+        return int(str(duration_str).rstrip("s"))
+    except ValueError:
+        return None
 
 
 def update_incident_status(incident: Incident, new_status: str, actor) -> Incident:

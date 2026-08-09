@@ -104,11 +104,19 @@ class Incident(models.Model):
         default=ActivationMethod.MANUAL,
     )
 
-    # GPS 
-    # Stored as decimal lat/lng. 
+    # GPS
+    # Stored as decimal lat/lng.
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     location_accuracy_metres = models.FloatField(null=True, blank=True)
+
+    # Live ambulance position, updated repeatedly by the responding EMT while
+    # en route (see IncidentViewSet.update_location). Deliberately FloatField
+    # rather than the DecimalField used for the patient's one-time SOS
+    # location above — this is a live-tracking value overwritten frequently,
+    # not a record that needs fixed decimal precision.
+    ambulance_lat = models.FloatField(null=True, blank=True)
+    ambulance_lng = models.FloatField(null=True, blank=True)
 
     # Timing 
     triggered_at = models.DateTimeField(default=timezone.now)         # SOS button pressed

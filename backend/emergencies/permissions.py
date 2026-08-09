@@ -48,6 +48,27 @@ class IsAcceptingAmbulance(BasePermission):
         return True
 
 
+class IsIncidentPatientOrAssignedAmbulance(BasePermission):
+    # Grants access to the incident's own patient, or the ambulance
+    # service/EMT currently assigned to it (via effective_ambulance_service,
+    # same resolution as IsAcceptingAmbulance/_get_assigned_incident).
+    # Used for live-tracking data (ambulance location, route) that both
+    # sides of an active incident need to read — deliberately does NOT
+    # require medical_profile_access_granted the way IsAcceptingAmbulance
+    # does, since tracking data isn't medical data.
+
+    message = "Access restricted to the patient or the assigned ambulance for this incident."
+
+    def has_object_permission(self, request, view, obj: Incident):
+        if obj.patient_id == request.user.id:
+            return True
+        if request.user.role in AMBULANCE_RESPONDER_ROLES:
+            account = request.user.effective_ambulance_service
+            if account is not None and obj.ambulance_service_id == account.id:
+                return True
+        return False
+
+
 class IsIncidentPatient(BasePermission):
     # The requesting user is the patient who owns this incident.
 

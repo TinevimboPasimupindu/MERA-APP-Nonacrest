@@ -27,6 +27,7 @@ export const ENDPOINTS = {
   cancelIncident: (id: string) => `/incidents/${id}/cancel/`,
   getIncident: (id: string) => `/incidents/${id}/`,
   updateStatus: (id: string) => `/incidents/${id}/update_status/`,
+  myActiveIncident: '/incidents/my_active/',
 
   // Verification
   verification: '/verification/',

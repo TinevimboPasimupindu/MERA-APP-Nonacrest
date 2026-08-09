@@ -65,6 +65,7 @@ class IncidentPatientSerializer(serializers.ModelSerializer):
             "arrived_at", "completed_at", "cancelled_at",
             "ambulance_service", "destination_hospital",
             "eta_minutes",
+            "ambulance_lat", "ambulance_lng",
             "was_offline_queued",
             "treatment_note",
             "log_entries",
@@ -121,6 +122,7 @@ class IncidentAmbulanceActiveSerializer(serializers.ModelSerializer):
             "triggered_at", "confirmed_at", "accepted_at",
             "arrived_at", "eta_minutes",
             "destination_hospital",
+            "ambulance_lat", "ambulance_lng",
             "medical_summary",
             "treatment_note",
             "log_entries",
@@ -224,3 +226,8 @@ class UpdateStatusSerializer(serializers.Serializer):
 class SelectHospitalSerializer(serializers.Serializer):
     hospital_user_id = serializers.UUIDField()
     eta_minutes = serializers.IntegerField(min_value=1, max_value=300)
+
+
+class UpdateLocationSerializer(serializers.Serializer):
+    ambulance_lat = serializers.FloatField(min_value=-90, max_value=90)
+    ambulance_lng = serializers.FloatField(min_value=-180, max_value=180)

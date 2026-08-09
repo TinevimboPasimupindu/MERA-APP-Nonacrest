@@ -9,9 +9,10 @@ import {
   Platform,
 } from 'react-native';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import MapView, { Marker, Polyline } from 'react-native-maps';
+import * as Location from 'expo-location';
 
 import {
   useFonts,
@@ -22,15 +23,62 @@ import {
 
 import { Colors, Spacing } from '../../constants/theme';
 import { apiCall } from '../../services/api';
+import { Coordinate, useSmoothCoordinate } from '../../hooks/use-smooth-coordinate';
+import { decodePolyline } from '../../utils/decode-polyline';
 
-const PATIENT_LOCATION = {
-  latitude: -26.2041,
-  longitude: 28.0473,
-};
+// How often this screen reports the EMT's own GPS position to the backend
+// while actively responding. Task spec calls for 10-15s; 12s splits that
+// range.
+const LOCATION_SEND_INTERVAL_MS = 12000;
 
-const AMBULANCE_LOCATION = {
-  latitude: -26.1929,
-  longitude: 28.0305,
+// Route-call throttling (GET /incidents/{id}/route/, which costs real
+// Google Routes API quota per call — see the reasoning note further down
+// by maybeFetchRoute). Combines a distance gate with a time-based floor
+// and ceiling rather than either alone:
+//   - ROUTE_RECALC_DISTANCE_METERS + ROUTE_MIN_INTERVAL_MS: once at least
+//     30s has passed AND the EMT has moved >=150m since the last route
+//     call's origin, recompute — a route/ETA from 150m away is still
+//     close enough to be useful, so no point recomputing for every few
+//     metres of GPS jitter.
+//   - ROUTE_MAX_INTERVAL_MS: recompute at least once a minute regardless
+//     of movement, even if the ambulance is stationary (stopped at a
+//     light, parked). This isn't about the route actually changing while
+//     stationary — Basic-tier routes don't factor live traffic, so a
+//     fixed position's route genuinely wouldn't change — it's a
+//     resilience/retry mechanism: if the last call failed (network
+//     hiccup, transient 503), this guarantees another attempt within a
+//     bounded time instead of only retrying once the EMT happens to move.
+const ROUTE_MIN_INTERVAL_MS = 30000;
+const ROUTE_MAX_INTERVAL_MS = 60000;
+const ROUTE_RECALC_DISTANCE_METERS = 150;
+
+function distanceMeters(a: Coordinate, b: Coordinate): number {
+  const R = 6371000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLng = toRad(b.longitude - a.longitude);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function formatDistance(meters?: number | null): string {
+  if (meters == null) return '—';
+  return meters >= 1000 ? `${(meters / 1000).toFixed(1)} km` : `${Math.round(meters)} m`;
+}
+
+function formatDuration(seconds?: number | null): string {
+  if (seconds == null) return '—';
+  const minutes = Math.round(seconds / 60);
+  return minutes < 1 ? '<1 min' : `${minutes} min`;
+}
+
+type RouteState = {
+  available: boolean;
+  distance_meters?: number;
+  duration_seconds?: number;
+  polyline?: string;
 };
 
 export default function ActiveResponse() {
@@ -44,6 +92,14 @@ export default function ActiveResponse() {
   const [status, setStatus] = useState<'waiting' | 'on_the_way' | 'arrived_on_scene'>('waiting');
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [notifying, setNotifying] = useState(false);
+
+  // My own device GPS — the source of truth for my own marker on the map
+  // (never derived from the server's ambulance_lat/lng, which is just this
+  // same value round-tripped back after a network delay).
+  const [myLocation, setMyLocation] = useState<Coordinate | null>(null);
+  const myCoordinate = useSmoothCoordinate(myLocation);
+  const [route, setRoute] = useState<RouteState | null>(null);
+  const lastRouteCallRef = useRef<{ time: number; origin: Coordinate } | null>(null);
 
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -76,6 +132,109 @@ export default function ActiveResponse() {
 
     fetchIncident();
     fetchHospitals();
+  }, [incidentId]);
+
+  // Report my own GPS position to the backend every ~12s while this screen
+  // is open, and (throttled separately, see maybeFetchRoute) refresh the
+  // route/ETA. Stops on unmount (nav away, e.g. "Add Notes"/back — cleanup
+  // below), on the incident turning completed/cancelled (detected from the
+  // update_location response itself, see below), and never restarts a
+  // second overlapping interval since this effect only depends on
+  // [incidentId].
+  useEffect(() => {
+    if (!incidentId) return;
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    async function maybeFetchRoute(current: Coordinate) {
+      // GET /incidents/{id}/route/ calls Google's Routes API server-side
+      // on every hit — real quota, real cost. Calling it on every 12s
+      // location tick would burn through that quota ~5x faster than
+      // needed for no real benefit (a route recomputed after the
+      // ambulance moved 20m isn't meaningfully different from the last
+      // one). So this is deliberately decoupled from the location-send
+      // cadence and gated on its own schedule — see the constants above
+      // for the full reasoning.
+      const last = lastRouteCallRef.current;
+      const now = Date.now();
+      const dueToStaleness = !last || now - last.time >= ROUTE_MAX_INTERVAL_MS;
+      const dueToMovement =
+        !!last &&
+        now - last.time >= ROUTE_MIN_INTERVAL_MS &&
+        distanceMeters(last.origin, current) >= ROUTE_RECALC_DISTANCE_METERS;
+
+      if (!dueToStaleness && !dueToMovement) return;
+
+      lastRouteCallRef.current = { time: now, origin: current };
+      try {
+        const data = await apiCall(`/incidents/${incidentId}/route/`, 'GET', undefined, true);
+        if (!cancelled) setRoute(data);
+      } catch (err) {
+        // Route info is a nice-to-have overlay, not core functionality —
+        // degrade to "no route" rather than disrupting the location-send
+        // loop or alerting the EMT over a single failed route lookup.
+        console.log('Route fetch error:', err);
+        if (!cancelled) setRoute({ available: false });
+      }
+    }
+
+    async function sendLocationTick() {
+      try {
+        const { status: permissionStatus } = await Location.requestForegroundPermissionsAsync();
+        if (permissionStatus !== 'granted') return;
+
+        const position = await Location.getCurrentPositionAsync({});
+        if (cancelled) return;
+
+        const here: Coordinate = {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+        };
+        setMyLocation(here);
+
+        const data = await apiCall(
+          `/incidents/${incidentId}/update_location/`,
+          'PATCH',
+          { ambulance_lat: here.latitude, ambulance_lng: here.longitude },
+          true
+        );
+        if (cancelled) return;
+
+        // update_location's response already carries the incident's
+        // current status for free (IncidentAmbulanceActiveSerializer
+        // includes it) — reusing that instead of running a second,
+        // separate polling loop just to detect the incident having been
+        // completed/cancelled by someone else (e.g. the patient
+        // cancelling) while this screen is open.
+        if (data?.status === 'completed' || data?.status === 'cancelled') {
+          if (intervalId) clearInterval(intervalId);
+          Alert.alert(
+            'Emergency Ended',
+            data.status === 'cancelled'
+              ? 'This emergency was cancelled.'
+              : 'This emergency has already been marked completed.'
+          );
+          router.replace('/(ambulance)/dashboard' as any);
+          return;
+        }
+
+        maybeFetchRoute(here);
+      } catch (err) {
+        // Quiet retry — a single missed GPS fix or network hiccup
+        // shouldn't interrupt an EMT mid-response with an alert; it just
+        // tries again next tick.
+        console.log('Location update error:', err);
+      }
+    }
+
+    sendLocationTick();
+    intervalId = setInterval(sendLocationTick, LOCATION_SEND_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incidentId]);
 
   const handleUpdateStatus = async (newStatus: 'on_the_way' | 'arrived_on_scene') => {
@@ -135,6 +294,21 @@ export default function ActiveResponse() {
 
   const medical = incident?.medical_summary;
 
+  // incident.latitude/longitude are Django DecimalFields, which DRF
+  // serializes as strings (e.g. "-26.204100") — parseFloat before handing
+  // to react-native-maps, same gotcha as the patient-side screen.
+  const patientCoordinate: Coordinate | null =
+    incident?.latitude != null && incident?.longitude != null
+      ? { latitude: parseFloat(incident.latitude), longitude: parseFloat(incident.longitude) }
+      : null;
+
+  // Only render a route line when a real driving route came back — no
+  // straight-line fallback here (unlike the patient screen's still-todo
+  // straight line), per spec: "the map should still show both markers
+  // even without a route line."
+  const routePoints: Coordinate[] =
+    route?.available && route.polyline ? decodePolyline(route.polyline) : [];
+
   return (
     <View style={styles.screen}>
 
@@ -155,24 +329,32 @@ export default function ActiveResponse() {
       </View>
 
       {/* Map — mobile only */}
-      {Platform.OS !== 'web' && (
+      {Platform.OS !== 'web' && (patientCoordinate || myCoordinate) && (
         <MapView
           style={styles.map}
           initialRegion={{
-            latitude: -26.1985,
-            longitude: 28.0389,
+            latitude: (patientCoordinate ?? myCoordinate)!.latitude,
+            longitude: (patientCoordinate ?? myCoordinate)!.longitude,
             latitudeDelta: 0.05,
             longitudeDelta: 0.05,
           }}
         >
-          <Marker coordinate={PATIENT_LOCATION} title="Patient" pinColor="red" />
-          <Marker coordinate={AMBULANCE_LOCATION} title="Ambulance" pinColor="blue" />
-          <Polyline
-            coordinates={[AMBULANCE_LOCATION, PATIENT_LOCATION]}
-            strokeColor={Colors.primary}
-            strokeWidth={4}
-          />
+          {patientCoordinate && (
+            <Marker coordinate={patientCoordinate} title="Patient" pinColor="red" />
+          )}
+          {myCoordinate && (
+            <Marker coordinate={myCoordinate} title="Your location" pinColor="blue" />
+          )}
+          {routePoints.length > 1 && (
+            <Polyline coordinates={routePoints} strokeColor={Colors.primary} strokeWidth={4} />
+          )}
         </MapView>
+      )}
+
+      {Platform.OS !== 'web' && !patientCoordinate && !myCoordinate && (
+        <View style={[styles.map, { backgroundColor: '#1A1D35', justifyContent: 'center', alignItems: 'center' }]}>
+          <ActivityIndicator color={Colors.primary} />
+        </View>
       )}
 
       {Platform.OS === 'web' && (
@@ -182,7 +364,13 @@ export default function ActiveResponse() {
       )}
 
       <View style={styles.addressRow}>
-        <Text style={styles.addressText}>📍 Patient location shared</Text>
+        {route?.available ? (
+          <Text style={styles.addressText}>
+            🚗 {formatDistance(route.distance_meters)} away • ETA {formatDuration(route.duration_seconds)}
+          </Text>
+        ) : (
+          <Text style={styles.addressText}>📍 Patient location shared</Text>
+        )}
       </View>
 
       {/* Scrollable Content */}

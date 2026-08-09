@@ -1,3 +1,5 @@
+import logging
+
 from django.db.models import Q
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -14,6 +16,7 @@ from .permissions import (
     IsAmbulanceResponder,
     IsDestinationHospital,
     IsIncidentPatient,
+    IsIncidentPatientOrAssignedAmbulance,
 )
 from .serializers import (
     AcceptIncidentSerializer,
@@ -26,9 +29,12 @@ from .serializers import (
     SOSTriggerSerializer,
     SelectHospitalSerializer,
     TreatmentNoteSerializer,
+    UpdateLocationSerializer,
     UpdateStatusSerializer,
 )
 from . import services
+
+logger = logging.getLogger(__name__)
 
 
 class IncidentViewSet(viewsets.GenericViewSet):
@@ -172,6 +178,39 @@ class IncidentViewSet(viewsets.GenericViewSet):
         serializer = IncidentAmbulanceActiveSerializer(incident)
         return Response(serializer.data)
 
+    # PATIENT or ASSIGNED AMBULANCE: Route (Google Routes API, server-side)
+
+    @action(detail=True, methods=["get"], permission_classes=[permissions.IsAuthenticated, IsIncidentPatientOrAssignedAmbulance])
+    def route(self, request, pk=None):
+        # Not looked up via _get_own_incident/_get_assigned_incident since
+        # this is the one endpoint both the patient AND the assigned
+        # ambulance can call — IsIncidentPatientOrAssignedAmbulance covers
+        # both, checked as an object permission the same way medical_detail
+        # checks IsAcceptingAmbulance above.
+        incident = self._get_incident_object(pk)
+        self.check_object_permissions(request, incident)
+
+        if incident.latitude is None or incident.longitude is None:
+            return Response({"available": False, "detail": "Patient location is not available."})
+        if incident.ambulance_lat is None or incident.ambulance_lng is None:
+            return Response({"available": False, "detail": "Ambulance location is not available yet."})
+
+        try:
+            route_data = services.get_route(
+                origin_lat=incident.ambulance_lat,
+                origin_lng=incident.ambulance_lng,
+                dest_lat=float(incident.latitude),
+                dest_lng=float(incident.longitude),
+            )
+        except Exception as exc:  # noqa: BLE001 — mirrors chatbot/views.py's handling of external API failures
+            logger.warning("Routes API call failed for incident %s: %r", incident.id, exc)
+            return Response(
+                {"detail": "Route information is currently unavailable. Please try again shortly."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response({"available": True, **route_data})
+
     # AMBULANCE: Select hospital
 
     @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceResponder])
@@ -215,6 +254,26 @@ class IncidentViewSet(viewsets.GenericViewSet):
 
         return Response(IncidentAmbulanceActiveSerializer(incident).data)
 
+    # AMBULANCE: Live location update
+
+    @action(detail=True, methods=["patch"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceResponder])
+    def update_location(self, request, pk=None):
+        # Same ownership resolution as select_hospital/update_status/
+        # treatment_notes above: _get_assigned_incident() 404s (not 403) if
+        # this incident isn't assigned to the requester's ambulance service,
+        # so a mismatched EMT/ambulance can't tell the difference between
+        # "not yours" and "doesn't exist."
+        incident = self._get_assigned_incident(pk)
+        serializer = UpdateLocationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        incident = services.update_ambulance_location(
+            incident,
+            lat=serializer.validated_data["ambulance_lat"],
+            lng=serializer.validated_data["ambulance_lng"],
+        )
+        return Response(IncidentAmbulanceActiveSerializer(incident).data)
+
     # AMBULANCE: Treatment notes
 
     @action(detail=True, methods=["post", "patch"], permission_classes=[permissions.IsAuthenticated, IsAmbulanceResponder])
@@ -244,6 +303,60 @@ class IncidentViewSet(viewsets.GenericViewSet):
         ).order_by("-triggered_at")
         serializer = IncidentAmbulanceActiveSerializer(incidents, many=True)
         return Response(serializer.data)
+
+    # PATIENT or AMBULANCE/EMT: my in-progress incident, for app-launch restore
+
+    @action(detail=False, methods=["get"], permission_classes=[permissions.IsAuthenticated], url_path="my_active")
+    def my_active(self, request):
+        # SC-01 support: on mobile app launch, restore an in-progress
+        # emergency (patient's own active SOS, or the EMT/ambulance's
+        # currently assigned response) instead of always landing on the
+        # role's normal dashboard. "In progress" is everything except
+        # COMPLETED/CANCELLED, via exclude() rather than an explicit
+        # include-list so a future new intermediate status is
+        # automatically covered without needing this view updated too.
+        user = request.user
+        terminal = [IncidentStatus.COMPLETED, IncidentStatus.CANCELLED]
+
+        if user.role == "patient":
+            incident = (
+                Incident.objects.filter(patient=user)
+                .exclude(status__in=terminal)
+                .order_by("-triggered_at")
+                .first()
+            )
+            if incident:
+                return Response({"active_incident": IncidentPatientSerializer(incident).data})
+            return Response({"active_incident": None})
+
+        if user.role in AMBULANCE_RESPONDER_ROLES:
+            account = user.effective_ambulance_service
+            if account is not None:
+                # Only fetch 2 — we just need to know "is there more than
+                # one candidate", not the full set.
+                candidates = list(
+                    Incident.objects.filter(ambulance_service=account)
+                    .exclude(status__in=terminal)
+                    .order_by("-triggered_at")[:2]
+                )
+                # Incident.ambulance_service is service-level, not
+                # per-EMT (see PROJECT_CONTEXT.md — incident attribution
+                # doesn't track which individual EMT is on which
+                # incident). If a service has multiple EMTs each mid-
+                # response on a *different* incident at once, this query
+                # can't tell which one belongs to the requesting EMT
+                # specifically. Guessing wrong would silently route an
+                # EMT into a colleague's response for a different
+                # patient, which is worse than just not auto-routing —
+                # so only auto-route when there's exactly one candidate;
+                # otherwise fall back to the normal dashboard.
+                if len(candidates) == 1:
+                    return Response(
+                        {"active_incident": IncidentAmbulanceActiveSerializer(candidates[0]).data}
+                    )
+            return Response({"active_incident": None})
+
+        return Response({"active_incident": None})
 
     # HOSPITAL: Incoming patients panel
 
