@@ -19,7 +19,9 @@ type Emergency = {
   status: string;
   priority_level: string;
   ambulance_service: string | null;
+  ambulance_service_name: string | null;
   destination_hospital: string | null;
+  destination_hospital_name: string | null;
   treatment_note: any | null;
 };
 
@@ -185,10 +187,10 @@ export default function EmergencyHistoryScreen() {
                     : 'Emergency'}
                 </Text>
                 <Text style={styles.historyMeta}>
-                  🚑  {h.ambulance_service || 'No ambulance assigned'}
+                  🚑  {h.ambulance_service_name || 'No ambulance assigned'}
                 </Text>
                 <Text style={styles.historyMeta}>
-                  🏥  {h.destination_hospital || 'No hospital assigned'}
+                  🏥  {h.destination_hospital_name || 'No hospital assigned'}
                 </Text>
 
                 <View style={styles.noteDivider} />

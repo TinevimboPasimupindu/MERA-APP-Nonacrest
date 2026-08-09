@@ -101,6 +101,52 @@ export default function ActiveResponse() {
   const [route, setRoute] = useState<RouteState | null>(null);
   const lastRouteCallRef = useRef<{ time: number; origin: Coordinate } | null>(null);
 
+  // incident.latitude/longitude are Django DecimalFields, which DRF
+  // serializes as strings (e.g. "-26.204100") — parseFloat before handing
+  // to react-native-maps, same gotcha as the patient-side screen. Hoisted
+  // above the fontsLoaded early-return below so the fit effect (which
+  // needs it and must run unconditionally, same as any other hook) can
+  // use it — a second, later derivation is no longer needed for render.
+  const patientCoordinate: Coordinate | null =
+    incident?.latitude != null && incident?.longitude != null
+      ? { latitude: parseFloat(incident.latitude), longitude: parseFloat(incident.longitude) }
+      : null;
+
+  // Camera auto-fit — same reasoning as emergency-active.tsx's identical
+  // fix: MapView's initialRegion only applies once at mount, so without
+  // this the camera stays wherever it first centered (patient-or-own
+  // location, whichever was known first) and never adjusts once the
+  // second marker appears, potentially off-screen. Gated on the same
+  // 150m movement threshold already used for route-call throttling below,
+  // reused rather than inventing a second magic number — cheap to re-fit,
+  // but re-fitting on every few metres of GPS jitter would be as
+  // distracting as never adjusting, and would fight manual pan/zoom.
+  const mapRef = useRef<MapView>(null);
+  const lastFitRef = useRef<{ patient: Coordinate; own: Coordinate } | null>(null);
+
+  useEffect(() => {
+    // Gated on myLocation (the raw GPS reading) rather than myCoordinate
+    // (its smoothed/animated display value) — myCoordinate changes on
+    // every frame of its 1.5s glide, which would re-fire this effect
+    // continuously during every animation instead of once per real GPS tick.
+    if (!patientCoordinate || !myLocation || !mapRef.current) return;
+
+    const last = lastFitRef.current;
+    const movedEnough =
+      !last ||
+      distanceMeters(last.patient, patientCoordinate) >= ROUTE_RECALC_DISTANCE_METERS ||
+      distanceMeters(last.own, myLocation) >= ROUTE_RECALC_DISTANCE_METERS;
+
+    if (!movedEnough) return;
+
+    lastFitRef.current = { patient: patientCoordinate, own: myLocation };
+    mapRef.current.fitToCoordinates([patientCoordinate, myLocation], {
+      edgePadding: { top: 60, right: 60, bottom: 60, left: 60 },
+      animated: true,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patientCoordinate?.latitude, patientCoordinate?.longitude, myLocation?.latitude, myLocation?.longitude]);
+
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
@@ -315,20 +361,18 @@ export default function ActiveResponse() {
 
   const medical = incident?.medical_summary;
 
-  // incident.latitude/longitude are Django DecimalFields, which DRF
-  // serializes as strings (e.g. "-26.204100") — parseFloat before handing
-  // to react-native-maps, same gotcha as the patient-side screen.
-  const patientCoordinate: Coordinate | null =
-    incident?.latitude != null && incident?.longitude != null
-      ? { latitude: parseFloat(incident.latitude), longitude: parseFloat(incident.longitude) }
-      : null;
-
   // Only render a route line when a real driving route came back — no
   // straight-line fallback here (unlike the patient screen's still-todo
   // straight line), per spec: "the map should still show both markers
   // even without a route line."
   const routePoints: Coordinate[] =
     route?.available && route.polyline ? decodePolyline(route.polyline) : [];
+
+  // See emergency-active.tsx's identical routeUnavailable for the full
+  // reasoning — distinct from "not fetched yet" (route === null), true
+  // once a fetch happened but produced nothing to draw, including the
+  // previously-silent available:true-but-no-polyline case.
+  const routeUnavailable = !!route && (!route.available || routePoints.length < 2);
 
   return (
     <View style={styles.screen}>
@@ -352,6 +396,7 @@ export default function ActiveResponse() {
       {/* Map — mobile only */}
       {Platform.OS !== 'web' && (patientCoordinate || myCoordinate) && (
         <MapView
+          ref={mapRef}
           style={styles.map}
           initialRegion={{
             latitude: (patientCoordinate ?? myCoordinate)!.latitude,
@@ -388,6 +433,15 @@ export default function ActiveResponse() {
         {route?.available ? (
           <Text style={styles.addressText}>
             🚗 {formatDistance(route.distance_meters)} away • ETA {formatDuration(route.duration_seconds)}
+          </Text>
+        ) : routeUnavailable ? (
+          // Distinct from the generic "not fetched yet" fallback below —
+          // this means a route fetch actually happened and produced
+          // nothing to draw, visible now instead of only in console.log
+          // (this screen gets tested on real devices with no dev tools
+          // attached).
+          <Text style={[styles.addressText, { color: Colors.warning }]}>
+            ⚠️ Route unavailable — location sharing still active
           </Text>
         ) : (
           <Text style={styles.addressText}>📍 Patient location shared</Text>
