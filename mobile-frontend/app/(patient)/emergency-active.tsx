@@ -150,6 +150,19 @@ export default function EmergencyActiveScreen() {
   const routePoints: Coordinate[] =
     route?.available && route.polyline ? decodePolyline(route.polyline) : [];
 
+  // Mirrors the backend's cancellable-statuses set exactly (cancel_incident
+  // in emergencies/services.py) — PENDING_CONFIRMATION/ACTIVE/DISPATCHED/
+  // ON_THE_WAY, not ARRIVED_ON_SCENE or later. Matches this app's existing
+  // "prevent the action, don't just show an error after the fact" pattern
+  // (see register.tsx's consent checkbox) — the button disappears once the
+  // crew is on scene rather than staying visible only to fail with an
+  // alert every time. `incident` being null (still loading, or a
+  // brand-new not-yet-fetched SOS) defaults to cancellable, since that's
+  // overwhelmingly the common case at that point and the backend remains
+  // the real enforcement point regardless.
+  const cancellableStatuses = ['pending_confirmation', 'active', 'dispatched', 'on_the_way'];
+  const canCancel = !incident || cancellableStatuses.includes(incident.status);
+
   const handleCancel = () => {
     Alert.alert(
       'Cancel Emergency?',
@@ -173,11 +186,15 @@ export default function EmergencyActiveScreen() {
               }
               router.replace('/(patient)/patient-dashboard' as any);
             } catch (err: any) {
-              // Cancellation is only allowed before an ambulance is
-              // dispatched (backend-enforced) — a failure here means the
-              // emergency is still genuinely active, so stay on this
-              // screen and say so rather than navigating away as if it
-              // had been cancelled when it hasn't been.
+              // Cancellation is allowed through ON_THE_WAY but backend-
+              // rejected once ARRIVED_ON_SCENE (see cancellable below —
+              // this catch is now mostly a safety net for a status change
+              // that happened between this screen's last poll and the tap,
+              // not the primary way ARRIVED_ON_SCENE is enforced). A
+              // failure here means the emergency is still genuinely
+              // active, so stay on this screen and say so rather than
+              // navigating away as if it had been cancelled when it hasn't
+              // been.
               console.log('Cancel error:', err);
               Alert.alert(
                 'Could Not Cancel',
@@ -313,10 +330,20 @@ export default function EmergencyActiveScreen() {
             ))}
           </View>
 
-          {/* Cancel Button */}
-          <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel}>
-            <Text style={styles.cancelBtnText}>Cancel Emergency</Text>
-          </TouchableOpacity>
+          {/* Cancel Button — hidden once the crew is on scene or later,
+              rather than staying visible only to fail with an error every
+              time (see canCancel above). */}
+          {canCancel ? (
+            <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel}>
+              <Text style={styles.cancelBtnText}>Cancel Emergency</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.cancelUnavailable}>
+              <Text style={styles.cancelUnavailableText}>
+                The crew is on scene — cancellation is no longer available. Speak with them directly if you need to.
+              </Text>
+            </View>
+          )}
 
           <Text style={styles.footer}>Stay calm. Help is on the way.</Text>
 
@@ -478,6 +505,21 @@ const styles = StyleSheet.create({
     color: Colors.emergency,
     fontSize: FontSizes.md,
     fontWeight: '600',
+  },
+  cancelUnavailable: {
+    backgroundColor: '#11122A',
+    borderWidth: 1,
+    borderColor: '#2A2B40',
+    borderRadius: BorderRadius.md,
+    padding: Spacing.md,
+    alignItems: 'center',
+    marginBottom: Spacing.md,
+  },
+  cancelUnavailableText: {
+    color: Colors.textSecondary,
+    fontSize: FontSizes.sm,
+    textAlign: 'center',
+    lineHeight: 20,
   },
   footer: {
     color: Colors.textSecondary,

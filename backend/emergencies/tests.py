@@ -91,6 +91,59 @@ class SOSCancelTest(TestCase):
         with self.assertRaises(ValueError):
             services.cancel_incident(incident, cancelled_by=patient)
 
+    # Product decision: a patient can now cancel through and including
+    # ON_THE_WAY (previously cancellation was blocked the moment an
+    # ambulance was even assigned) — but not once ARRIVED_ON_SCENE, since
+    # only the crew on scene can assess/resolve from that point on. See
+    # PROJECT_CONTEXT.md for the full reasoning.
+
+    @patch("emergencies.services._broadcast_ws")
+    @patch("emergencies.services._notify")
+    def test_cancel_dispatched_incident(self, mock_notify, mock_ws):
+        patient = make_verified_patient()
+        ambulance = make_ambulance()
+        incident = Incident.objects.create(patient=patient, status=IncidentStatus.ACTIVE)
+        services.accept_incident(incident, ambulance_service=ambulance, actor=ambulance)
+        incident.refresh_from_db()
+        self.assertEqual(incident.status, IncidentStatus.DISPATCHED)
+
+        services.cancel_incident(incident, cancelled_by=patient, reason="No longer needed")
+        incident.refresh_from_db()
+        self.assertEqual(incident.status, IncidentStatus.CANCELLED)
+        self.assertFalse(incident.medical_profile_access_granted)
+
+    @patch("emergencies.services._broadcast_ws")
+    @patch("emergencies.services._notify")
+    def test_cancel_on_the_way_incident(self, mock_notify, mock_ws):
+        patient = make_verified_patient()
+        ambulance = make_ambulance()
+        incident = Incident.objects.create(patient=patient, status=IncidentStatus.ACTIVE)
+        services.accept_incident(incident, ambulance_service=ambulance, actor=ambulance)
+        services.update_incident_status(incident, IncidentStatus.ON_THE_WAY, actor=ambulance)
+        incident.refresh_from_db()
+        self.assertEqual(incident.status, IncidentStatus.ON_THE_WAY)
+
+        services.cancel_incident(incident, cancelled_by=patient, reason="False alarm")
+        incident.refresh_from_db()
+        self.assertEqual(incident.status, IncidentStatus.CANCELLED)
+        self.assertFalse(incident.medical_profile_access_granted)
+
+    @patch("emergencies.services._broadcast_ws")
+    @patch("emergencies.services._notify")
+    def test_cannot_cancel_arrived_on_scene_incident(self, mock_notify, mock_ws):
+        patient = make_verified_patient()
+        ambulance = make_ambulance()
+        incident = Incident.objects.create(patient=patient, status=IncidentStatus.ACTIVE)
+        services.accept_incident(incident, ambulance_service=ambulance, actor=ambulance)
+        services.update_incident_status(incident, IncidentStatus.ARRIVED_ON_SCENE, actor=ambulance)
+        incident.refresh_from_db()
+        self.assertEqual(incident.status, IncidentStatus.ARRIVED_ON_SCENE)
+
+        with self.assertRaises(ValueError):
+            services.cancel_incident(incident, cancelled_by=patient)
+        incident.refresh_from_db()
+        self.assertEqual(incident.status, IncidentStatus.ARRIVED_ON_SCENE)
+
 
 class AcceptIncidentTest(TestCase):
 

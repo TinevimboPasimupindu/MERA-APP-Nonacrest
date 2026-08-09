@@ -84,13 +84,35 @@ def confirm_sos(incident: Incident, method: str = ActivationMethod.MANUAL) -> In
 
 
 def cancel_incident(incident: Incident, cancelled_by, reason: str = "") -> Incident:
-    cancellable = {IncidentStatus.PENDING_CONFIRMATION, IncidentStatus.ACTIVE}
+    # Product decision: cancellation stays available through DISPATCHED and
+    # ON_THE_WAY (an ambulance can already be assigned/en route) — only once
+    # the crew is physically ARRIVED_ON_SCENE does the situation stop being
+    # something the patient can unilaterally call off; from that point on,
+    # only the crew on scene can assess and resolve it. Before ARRIVED_ON_
+    # SCENE, cancelling still saves resources on a false alarm.
+    cancellable = {
+        IncidentStatus.PENDING_CONFIRMATION,
+        IncidentStatus.ACTIVE,
+        IncidentStatus.DISPATCHED,
+        IncidentStatus.ON_THE_WAY,
+    }
     if incident.status not in cancellable:
         raise ValueError(f"Cannot cancel an incident in status '{incident.status}'.")
 
     with transaction.atomic():
         incident.cancel(cancelled_by_user=cancelled_by, reason=reason)
         _log(incident, "sos_cancelled", description=reason, actor=cancelled_by)
+
+    # Only DISPATCHED/ON_THE_WAY cancellations have an ambulance assigned
+    # yet to notify — the pre-dispatch statuses above never had one. The
+    # ambulance/EMT actually already viewing this incident (active-response.
+    # tsx) learns of it for real within one ~12s location-send tick, since
+    # that PATCH's response already carries the incident's current status
+    # and that screen already treats a cancelled/completed status as "stop
+    # and alert the EMT" — this stub is just this transition's equivalent
+    # of the push-notification stubs every other transition point logs.
+    if incident.ambulance_service_id:
+        _notify("Ambulance %s would be push-notified that the patient cancelled.", incident.ambulance_service_id)
 
     return incident
 
