@@ -26,6 +26,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+# Server-side only, same as ANTHROPIC_API_KEY above — never sent to either
+# frontend. See emergencies/services.py::get_route(), the only place this
+# is read.
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 

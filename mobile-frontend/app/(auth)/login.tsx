@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { FontAwesome } from '@expo/vector-icons';
 import { Ionicons } from '@expo/vector-icons';
 import { apiCall, ENDPOINTS, saveToken } from '../../services/api';
+import { routeAfterAuth } from '../../utils/route-after-auth';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -35,17 +36,11 @@ export default function LoginScreen() {
       const data = await apiCall(ENDPOINTS.login, 'POST', { email, password });
       await saveToken(data.access, data.refresh);
 
-      const role = data.user.role;
-
-      if (role === 'patient') {
-        router.replace('/(patient)/patient-dashboard' as any);
-      } else if (role === 'hospital') {
-        router.replace('/(hospital)/HospitalPortal' as any);
-      } else if (role === 'ambulance_service') {
-        router.replace('/(ambulance)/dashboard' as any);
-      } else if (role === 'emt') {
-        router.replace('/(ambulance)/dashboard' as any);
-      }
+      // Lands back in an in-progress emergency (active SOS / assigned
+      // response) if the logging-in user has one, instead of always the
+      // normal role dashboard — same decision app-launch session-restore
+      // makes in (auth)/index.tsx, via the same shared helper.
+      await routeAfterAuth(data.user.role);
     } catch (err: any) {
       setError(err.detail || 'Login failed. Please try again.');
     } finally {
@@ -171,6 +166,11 @@ export default function LoginScreen() {
       <View style={styles.secureBadge}>
         <Text style={styles.secureText}>🔒 Secure & HIPAA Compliant</Text>
       </View>
+
+      {/* Terms & Conditions — accessible before logging in */}
+      <TouchableOpacity onPress={() => router.push('/(auth)/terms-and-conditions' as any)}>
+        <Text style={styles.termsLink}>Terms & Conditions</Text>
+      </TouchableOpacity>
 
     </ScrollView>
   );
@@ -354,5 +354,11 @@ const styles = StyleSheet.create({
   secureText: {
     color: Colors.textSecondary,
     fontSize: FontSizes.xs,
+  },
+  termsLink: {
+    color: Colors.textSecondary,
+    fontSize: FontSizes.xs,
+    textDecorationLine: 'underline',
+    marginTop: Spacing.md,
   },
 });

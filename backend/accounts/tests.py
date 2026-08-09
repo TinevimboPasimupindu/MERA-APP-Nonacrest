@@ -61,6 +61,30 @@ class PatientRegistrationTest(TestCase):
         response = self.client.post(self.url, data)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_terms_consent_required(self):
+        data = {
+            "full_name": "Sipho Dlamini",
+            "email": "sipho@example.com",
+            "phone_number": "+27831234567",
+            "password": "SecurePass123!",
+            "confirm_password": "SecurePass123!",
+            "popi_consent": True,
+            "terms_consent": False,
+        }
+        response = self.client.post(self.url, data)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_consent_fields_missing_entirely_rejected(self):
+        data = {
+            "full_name": "Zanele Khumalo",
+            "email": "zanele@example.com",
+            "phone_number": "+27837654321",
+            "password": "SecurePass123!",
+            "confirm_password": "SecurePass123!",
+        }
+        response = self.client.post(self.url, data)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
 
 class LoginTest(TestCase):
     def setUp(self):

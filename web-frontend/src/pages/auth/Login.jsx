@@ -112,6 +112,12 @@ export default function Login() {
           </button>
         </form>
       </div>
+
+      <div className="login-footer">
+        <button type="button" className="login-footer-link" onClick={() => navigate('/terms-and-conditions')}>
+          Terms & Conditions
+        </button>
+      </div>
     </div>
   );
 }

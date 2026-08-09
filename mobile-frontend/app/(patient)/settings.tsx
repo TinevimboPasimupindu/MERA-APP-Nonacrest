@@ -165,7 +165,24 @@ export default function SettingsScreen() {
         {/* Support & Legal */}
         <Text style={styles.sectionLabel}>SUPPORT & LEGAL</Text>
         <SettingsRow icon="❓" iconBg="#12121E" label="FAQs" sub="Frequently asked questions" onPress={() => {}} />
-        <SettingsRow icon="🔏" iconBg="#12121E" label="Privacy Policy" sub="How MERA handles your data" onPress={() => {}} />
+        <SettingsRow
+          icon="📜"
+          iconBg="#12121E"
+          label="Terms & Conditions"
+          sub="Terms of use, and how MERA handles your data"
+          onPress={() => router.push('/(auth)/terms-and-conditions' as any)}
+        />
+        {/* Same destination as Terms & Conditions above — this is a
+            combined document covering both, see PROJECT_CONTEXT.md. Kept
+            as its own row since "Privacy Policy" is still the label a
+            patient is likely to look for specifically. */}
+        <SettingsRow
+          icon="🔏"
+          iconBg="#12121E"
+          label="Privacy Policy"
+          sub="How MERA handles your data"
+          onPress={() => router.push('/(auth)/terms-and-conditions' as any)}
+        />
         <SettingsRow icon="💬" iconBg="#12121E" label="Contact Support" sub="Get help from the MERA team" onPress={() => {}} />
 
         {/* Log out */}

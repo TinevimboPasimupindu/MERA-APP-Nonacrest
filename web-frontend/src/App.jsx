@@ -6,6 +6,7 @@ import AmbulanceAdminLayout from './layouts/AmbulanceAdminLayout'
 import HospitalAdminLayout from './layouts/HospitalAdminLayout'
 import MeraAdminLayout from './layouts/MeraAdminLayout'
 import Login from './pages/auth/Login'
+import TermsAndConditions from './pages/auth/TermsAndConditions'
 import Dashboard from './pages/hospital-admin/Dashboard'
 import VerificationQueue from './pages/hospital-admin/VerificationQueue'
 import VerificationReview from './pages/hospital-admin/VerificationReview'
@@ -26,6 +27,7 @@ function App() {
       <ToastProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/terms-and-conditions" element={<TermsAndConditions />} />
 
           <Route
             path="/hospital-admin"

@@ -1,7 +1,10 @@
-import { View, Text, Image, StyleSheet, TouchableOpacity, Dimensions } from 'react-native';
+import { useEffect, useState } from 'react';
+import { View, Text, Image, StyleSheet, TouchableOpacity, Dimensions, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useFonts, LibreBaskerville_700Bold } from '@expo-google-fonts/libre-baskerville';
 import { Colors, FontSizes, Spacing, BorderRadius } from '../../constants/theme';
+import { apiCall, ENDPOINTS, getToken, clearTokens } from '../../services/api';
+import { routeAfterAuth } from '../../utils/route-after-auth';
 
 const { height } = Dimensions.get('window');
 
@@ -10,8 +13,54 @@ export default function SplashScreen() {
   const [fontsLoaded] = useFonts({
     LibreBaskerville_700Bold,
   });
+  const [checkingSession, setCheckingSession] = useState(true);
 
-  if (!fontsLoaded) return null;
+  // SC-01: on every app launch, restore an existing session automatically
+  // rather than always showing this login splash — and if the
+  // already-authenticated user has an in-progress emergency (active SOS /
+  // assigned response), land them straight back in it via the same
+  // routeAfterAuth() decision manual login uses, instead of dropping them
+  // on the normal dashboard. No stored token, or a token that no longer
+  // verifies (expired/deactivated/network failure) → fall through to the
+  // normal splash below, same as any logged-out user.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function checkExistingSession() {
+      const token = await getToken();
+      if (!token) {
+        if (!cancelled) setCheckingSession(false);
+        return;
+      }
+      try {
+        const me = await apiCall(ENDPOINTS.me, 'GET', undefined, true);
+        if (cancelled) return;
+        await routeAfterAuth(me.role);
+        // If routeAfterAuth didn't navigate (a role with no mobile
+        // destination), fall through to the normal splash rather than
+        // hanging on the spinner forever. Harmless no-op if it did
+        // navigate — this component is about to unmount either way.
+        if (!cancelled) setCheckingSession(false);
+      } catch (err) {
+        console.log('Session restore failed:', err);
+        await clearTokens();
+        if (!cancelled) setCheckingSession(false);
+      }
+    }
+
+    checkExistingSession();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!fontsLoaded || checkingSession) {
+    return (
+      <View style={[styles.container, styles.loadingContainer]}>
+        <ActivityIndicator color={Colors.primary} size="large" />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -61,6 +110,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: Colors.background,
     alignItems: 'center',
+  },
+  loadingContainer: {
+    justifyContent: 'center',
   },
   backgroundImage: {
     position: 'absolute',

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -15,25 +15,78 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Location from 'expo-location';
 import { Colors, FontSizes, Spacing, BorderRadius } from '../../constants/theme';
 import { apiCall, ENDPOINTS } from '../../services/api';
+import { Coordinate, useSmoothCoordinate } from '../../hooks/use-smooth-coordinate';
+import { decodePolyline } from '../../utils/decode-polyline';
 
-const PATIENT_LOCATION = {
-  latitude: -26.2041,
-  longitude: 28.0473,
-};
+// Route-call throttling — same reasoning and constants as
+// active-response.tsx's maybeFetchRoute (see PROJECT_CONTEXT.md for the
+// full write-up), just measuring a different party's movement: there, it's
+// the EMT's own device GPS changing between their 12s ticks; here, the
+// patient's own SOS location never moves, so what matters is the
+// AMBULANCE's server-reported position changing between this screen's own
+// 10s incident polls. Same distance/time gates, same underlying judgment
+// call about how far is "far enough" to justify another Google Routes API
+// call — that judgment doesn't depend on which side is doing the polling.
+const ROUTE_MIN_INTERVAL_MS = 30000;
+const ROUTE_MAX_INTERVAL_MS = 60000;
+const ROUTE_RECALC_DISTANCE_METERS = 150;
 
-const AMBULANCE_LOCATION = {
-  latitude: -26.1929,
-  longitude: 28.0305,
+function distanceMeters(a: Coordinate, b: Coordinate): number {
+  const R = 6371000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLng = toRad(b.longitude - a.longitude);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+type RouteState = {
+  available: boolean;
+  distance_meters?: number;
+  duration_seconds?: number;
+  polyline?: string;
 };
 
 export default function EmergencyActiveScreen() {
   const { incidentId } = useLocalSearchParams<{ incidentId: string }>();
   const [incident, setIncident] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [route, setRoute] = useState<RouteState | null>(null);
+  const lastRouteCallRef = useRef<{ time: number; origin: Coordinate } | null>(null);
 
   // Poll for incident updates every 10 seconds
   useEffect(() => {
     if (!incidentId) return;
+    let cancelled = false;
+
+    async function maybeFetchRoute(ambulancePosition: Coordinate) {
+      // GET /incidents/{id}/route/ calls Google's Routes API server-side —
+      // real quota per call, so this is deliberately not fired on every
+      // 10s poll. See the constants above for the throttling reasoning.
+      const last = lastRouteCallRef.current;
+      const now = Date.now();
+      const dueToStaleness = !last || now - last.time >= ROUTE_MAX_INTERVAL_MS;
+      const dueToMovement =
+        !!last &&
+        now - last.time >= ROUTE_MIN_INTERVAL_MS &&
+        distanceMeters(last.origin, ambulancePosition) >= ROUTE_RECALC_DISTANCE_METERS;
+
+      if (!dueToStaleness && !dueToMovement) return;
+
+      lastRouteCallRef.current = { time: now, origin: ambulancePosition };
+      try {
+        const data = await apiCall(`/incidents/${incidentId}/route/`, 'GET', undefined, true);
+        if (!cancelled) setRoute(data);
+      } catch (err) {
+        // Route info is a nice-to-have overlay, not core functionality —
+        // degrade to "no route" rather than disrupting the incident poll
+        // or alerting the patient over a single failed route lookup.
+        console.log('Route fetch error:', err);
+        if (!cancelled) setRoute({ available: false });
+      }
+    }
 
     const fetchIncident = async () => {
       try {
@@ -45,24 +98,57 @@ export default function EmergencyActiveScreen() {
           undefined,
           true
         );
+        if (cancelled) return;
         setIncident(data);
 
         // Navigate away if emergency is completed or cancelled
         if (data.status === 'completed' || data.status === 'cancelled') {
           router.replace('/(patient)/patient-dashboard' as any);
+          return;
         }
 
+        if (data.ambulance_lat != null && data.ambulance_lng != null) {
+          maybeFetchRoute({ latitude: data.ambulance_lat, longitude: data.ambulance_lng });
+        }
       } catch (err) {
         console.log('Error fetching incident:', err);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     fetchIncident();
     const interval = setInterval(fetchIncident, 10000);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [incidentId]);
+
+  // incident.latitude/longitude are Django DecimalFields, which DRF
+  // serializes as strings (e.g. "-26.204100") — parseFloat before handing
+  // to react-native-maps. ambulance_lat/ambulance_lng are plain FloatFields
+  // and already arrive as numbers. Coordinates are nullable on both sides
+  // (a SOS can be triggered without GPS, and the ambulance hasn't sent a
+  // location yet until its first update_location call), so both resolve to
+  // null rather than NaN when absent.
+  const patientCoordinate: Coordinate | null =
+    incident?.latitude != null && incident?.longitude != null
+      ? { latitude: parseFloat(incident.latitude), longitude: parseFloat(incident.longitude) }
+      : null;
+
+  const ambulanceTarget: Coordinate | null =
+    incident?.ambulance_lat != null && incident?.ambulance_lng != null
+      ? { latitude: incident.ambulance_lat, longitude: incident.ambulance_lng }
+      : null;
+
+  const ambulanceCoordinate = useSmoothCoordinate(ambulanceTarget);
+
+  // Only render a route line when a real driving route came back — no
+  // straight-line fallback (that's what this replaces). Both markers still
+  // render regardless; a missing/failed route just means no line.
+  const routePoints: Coordinate[] =
+    route?.available && route.polyline ? decodePolyline(route.polyline) : [];
 
   const handleCancel = () => {
     Alert.alert(
@@ -180,23 +266,29 @@ export default function EmergencyActiveScreen() {
           </View>
 
           {/* Map */}
-          <MapView
-            style={styles.map}
-            initialRegion={{
-              latitude: -26.1985,
-              longitude: 28.0389,
-              latitudeDelta: 0.05,
-              longitudeDelta: 0.05,
-            }}
-          >
-            <Marker coordinate={PATIENT_LOCATION} title="Patient" pinColor="red" />
-            <Marker coordinate={AMBULANCE_LOCATION} title="Ambulance" pinColor="blue" />
-            <Polyline
-              coordinates={[AMBULANCE_LOCATION, PATIENT_LOCATION]}
-              strokeColor={Colors.primary}
-              strokeWidth={4}
-            />
-          </MapView>
+          {patientCoordinate ? (
+            <MapView
+              style={styles.map}
+              initialRegion={{
+                latitude: patientCoordinate.latitude,
+                longitude: patientCoordinate.longitude,
+                latitudeDelta: 0.05,
+                longitudeDelta: 0.05,
+              }}
+            >
+              <Marker coordinate={patientCoordinate} title="Your location" pinColor="red" />
+              {ambulanceCoordinate && (
+                <Marker coordinate={ambulanceCoordinate} title="Ambulance" pinColor="blue" />
+              )}
+              {routePoints.length > 1 && (
+                <Polyline coordinates={routePoints} strokeColor={Colors.primary} strokeWidth={4} />
+              )}
+            </MapView>
+          ) : (
+            <View style={[styles.map, styles.mapPlaceholder]}>
+              <Text style={styles.mapPlaceholderText}>Waiting for your location…</Text>
+            </View>
+          )}
 
           {/* Status Steps */}
           <View style={styles.stepsContainer}>
@@ -317,6 +409,17 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     marginBottom: Spacing.md,
     overflow: 'hidden',
+  },
+  mapPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#11122A',
+    borderWidth: 1,
+    borderColor: '#2A2B40',
+  },
+  mapPlaceholderText: {
+    color: Colors.textSecondary,
+    fontSize: FontSizes.sm,
   },
   stepsContainer: {
     marginBottom: Spacing.md,
