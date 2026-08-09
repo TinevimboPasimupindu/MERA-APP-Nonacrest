@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export const BASE_URL = 'http://172.16.18.77:8000/api';
+export const BASE_URL = 'https://mera-app-nonacrest.onrender.com/api';
 // For local backend testing, swap to: 'http://172.16.18.77:8000/api' FOR DEPLOYED WEB USE: 'https://mera-app-nonacrest.onrender.com/api'
 
 export const ENDPOINTS = {
