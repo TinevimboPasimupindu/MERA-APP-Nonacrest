@@ -42,6 +42,17 @@ function distanceMeters(a: Coordinate, b: Coordinate): number {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
+// Same formatting active-response.tsx already uses for the EMT's own ETA
+// display — this screen was showing incident.eta_minutes instead (the
+// ambulance-to-HOSPITAL ETA, only set once a hospital is notified, and a
+// hardcoded stub value even then — see PROJECT_CONTEXT.md), never the real
+// ambulance-to-PATIENT duration this fetched route/ already carries.
+function formatDuration(seconds?: number | null): string {
+  if (seconds == null) return '—';
+  const minutes = Math.round(seconds / 60);
+  return minutes < 1 ? '<1 min' : `${minutes} min`;
+}
+
 type RouteState = {
   available: boolean;
   distance_meters?: number;
@@ -150,6 +161,47 @@ export default function EmergencyActiveScreen() {
   const routePoints: Coordinate[] =
     route?.available && route.polyline ? decodePolyline(route.polyline) : [];
 
+  // Distinct from "route hasn't been fetched yet" (route === null, no
+  // ambulance location to route from yet — not an error). True once a
+  // fetch has actually happened and didn't produce a usable line: the
+  // fetch threw (caught below, stored as {available:false}), the backend
+  // explicitly said available:false, or — the case that was previously
+  // completely silent — the backend said available:true but polyline came
+  // back empty/missing, so decodePolyline had nothing to decode.
+  const routeUnavailable = !!route && (!route.available || routePoints.length < 2);
+
+  // Camera auto-fit — MapView's initialRegion is a one-time value (react-
+  // native-maps never re-reads it after mount), so without this the camera
+  // stays locked on wherever it was centered at first render and never
+  // adjusts once the ambulance marker appears, potentially off-screen.
+  // fitToCoordinates is the imperative API for this. Gated on real
+  // movement rather than firing on every 10s poll (same distance-threshold
+  // judgment already used for route-call throttling below, reused as-is
+  // rather than inventing a second magic number) — a smoothly-animated
+  // camera jump on every poll would be as distracting as never moving at
+  // all, and would fight anyone trying to manually pan/zoom the map.
+  const mapRef = useRef<MapView>(null);
+  const lastFitRef = useRef<{ patient: Coordinate; ambulance: Coordinate } | null>(null);
+
+  useEffect(() => {
+    if (!patientCoordinate || !ambulanceTarget || !mapRef.current) return;
+
+    const last = lastFitRef.current;
+    const movedEnough =
+      !last ||
+      distanceMeters(last.patient, patientCoordinate) >= ROUTE_RECALC_DISTANCE_METERS ||
+      distanceMeters(last.ambulance, ambulanceTarget) >= ROUTE_RECALC_DISTANCE_METERS;
+
+    if (!movedEnough) return;
+
+    lastFitRef.current = { patient: patientCoordinate, ambulance: ambulanceTarget };
+    mapRef.current.fitToCoordinates([patientCoordinate, ambulanceTarget], {
+      edgePadding: { top: 60, right: 60, bottom: 60, left: 60 },
+      animated: true,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patientCoordinate?.latitude, patientCoordinate?.longitude, ambulanceTarget?.latitude, ambulanceTarget?.longitude]);
+
   // Mirrors the backend's cancellable-statuses set exactly (cancel_incident
   // in emergencies/services.py) — PENDING_CONFIRMATION/ACTIVE/DISPATCHED/
   // ON_THE_WAY, not ARRIVED_ON_SCENE or later. Matches this app's existing
@@ -220,7 +272,9 @@ export default function EmergencyActiveScreen() {
       steps.push({
         icon: '🚑',
         label: 'Ambulance Dispatched',
-        sub: incident.eta_minutes ? `ETA ${incident.eta_minutes} min` : 'En route',
+        sub: route?.available && route.duration_seconds != null
+          ? `ETA ${formatDuration(route.duration_seconds)}`
+          : 'En route',
         color: Colors.warning,
       });
     }
@@ -276,16 +330,16 @@ export default function EmergencyActiveScreen() {
           <View style={styles.dispatchCard}>
             <Text style={styles.dispatchHeading}>🚑  Ambulance Assigned</Text>
             <Text style={styles.dispatchName}>
-              {incident?.ambulance_service ?? 'Searching for ambulance...'}
+              {incident?.ambulance_service_name ?? 'Searching for ambulance...'}
             </Text>
             <Text style={styles.dispatchEta}>
-              {incident?.eta_minutes
-                ? `ETA  ${incident.eta_minutes} minutes`
+              {route?.available && route.duration_seconds != null
+                ? `ETA  ${formatDuration(route.duration_seconds)}`
                 : 'Calculating ETA...'}
             </Text>
             <Text style={styles.dispatchHospital}>
-              🏥  {incident?.destination_hospital
-                ? `Destination: ${incident.destination_hospital}`
+              🏥  {incident?.destination_hospital_name
+                ? `Destination: ${incident.destination_hospital_name}`
                 : 'Hospital not yet assigned'}
             </Text>
             <Text style={styles.dispatchLocation}>📍  Your location has been shared</Text>
@@ -294,6 +348,7 @@ export default function EmergencyActiveScreen() {
           {/* Map */}
           {patientCoordinate ? (
             <MapView
+              ref={mapRef}
               style={styles.map}
               initialRegion={{
                 latitude: patientCoordinate.latitude,
@@ -313,6 +368,24 @@ export default function EmergencyActiveScreen() {
           ) : (
             <View style={[styles.map, styles.mapPlaceholder]}>
               <Text style={styles.mapPlaceholderText}>Waiting for your location…</Text>
+            </View>
+          )}
+
+          {/* Route diagnostics — surfaced visibly, not just console.log,
+              since this needs to be diagnosable on a real device with no
+              dev tools attached. Covers three distinct silent-failure
+              shapes as one signal: the fetch itself throwing, the backend
+              explicitly returning available:false, and the backend
+              returning available:true but with no usable polyline (a
+              "succeeded but produced nothing to draw" case that otherwise
+              looks identical to "no route needed yet"). Only shown once
+              there's actually an ambulance to route to — no point
+              flagging "route unavailable" before dispatch. */}
+          {ambulanceCoordinate && routeUnavailable && (
+            <View style={styles.routeUnavailableBanner}>
+              <Text style={styles.routeUnavailableText}>
+                ⚠️ Route unavailable — showing ambulance location only
+              </Text>
             </View>
           )}
 
@@ -456,6 +529,20 @@ const styles = StyleSheet.create({
   mapPlaceholderText: {
     color: Colors.textSecondary,
     fontSize: FontSizes.sm,
+  },
+  routeUnavailableBanner: {
+    backgroundColor: '#2A1F00',
+    borderRadius: BorderRadius.sm,
+    borderWidth: 1,
+    borderColor: Colors.warning,
+    padding: Spacing.sm,
+    marginBottom: Spacing.md,
+    marginTop: -Spacing.sm,
+  },
+  routeUnavailableText: {
+    color: Colors.warning,
+    fontSize: FontSizes.xs,
+    textAlign: 'center',
   },
   stepsContainer: {
     marginBottom: Spacing.md,

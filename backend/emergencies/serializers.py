@@ -56,6 +56,18 @@ class IncidentPatientSerializer(serializers.ModelSerializer):
     log_entries = EmergencyLogSerializer(many=True, read_only=True)
     treatment_note = TreatmentNoteSerializer(read_only=True)
 
+    # ambulance_service/destination_hospital are left in as plain FK ids
+    # (existing behavior — some frontend truthy checks key off their
+    # presence, not their content) but a bare FK on a ModelSerializer
+    # serializes to its primary key by default, which for User is a UUID —
+    # not something to display as-is. These two give the frontend an
+    # actual human-readable name, same pattern IncidentHospitalIncomingSerializer
+    # already uses for get_ambulance_name below, but via User.get_display_name()
+    # for full correctness (facility_name/service_name/full_name resolution,
+    # not just the ambulance-only service_name lookup that pattern used).
+    ambulance_service_name = serializers.SerializerMethodField()
+    destination_hospital_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Incident
         fields = [
@@ -63,7 +75,8 @@ class IncidentPatientSerializer(serializers.ModelSerializer):
             "latitude", "longitude",
             "triggered_at", "confirmed_at", "accepted_at",
             "arrived_at", "completed_at", "cancelled_at",
-            "ambulance_service", "destination_hospital",
+            "ambulance_service", "ambulance_service_name",
+            "destination_hospital", "destination_hospital_name",
             "eta_minutes",
             "ambulance_lat", "ambulance_lng",
             "was_offline_queued",
@@ -71,6 +84,12 @@ class IncidentPatientSerializer(serializers.ModelSerializer):
             "log_entries",
         ]
         read_only_fields = fields
+
+    def get_ambulance_service_name(self, obj):
+        return obj.ambulance_service.get_display_name() if obj.ambulance_service else None
+
+    def get_destination_hospital_name(self, obj):
+        return obj.destination_hospital.get_display_name() if obj.destination_hospital else None
 
 # Incident — Ambulance broadcast list view (NO medical data)
 
