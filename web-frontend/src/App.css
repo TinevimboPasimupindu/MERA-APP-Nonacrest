@@ -177,6 +177,135 @@ body {
   text-align: center;
 }
 
+.login-footer {
+  position: relative;
+  z-index: 1;
+  margin-top: 1.5rem;
+  text-align: center;
+}
+
+.login-footer-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #A0A0B0;
+  font-size: 0.8rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.login-footer-link:hover {
+  color: #FFFFFF;
+}
+
+/* ---- Terms & Conditions page -------------------------------------- */
+/* Public, unauthenticated page — same dark palette as .login-page, but a
+   scrollable readable document instead of a centered card. */
+
+.terms-page {
+  min-height: 100vh;
+  background-color: #0F0F1A;
+  color: #FFFFFF;
+}
+
+.terms-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid #2A2B40;
+  position: sticky;
+  top: 0;
+  background-color: #0F0F1A;
+  z-index: 1;
+}
+
+.terms-back {
+  background: none;
+  border: none;
+  color: #A0A0B0;
+  font-size: 0.9rem;
+  cursor: pointer;
+  padding: 0.4rem 0;
+}
+
+.terms-back:hover {
+  color: #FFFFFF;
+}
+
+.terms-header-title {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.terms-content {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+.terms-doc-title {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 1.8rem;
+  margin-bottom: 0.25rem;
+}
+
+.terms-last-updated {
+  color: #A0A0B0;
+  font-size: 0.8rem;
+  margin-bottom: 2rem;
+}
+
+.terms-section {
+  margin-bottom: 1.5rem;
+}
+
+.terms-heading {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-bottom: 0.6rem;
+}
+
+.terms-paragraph {
+  color: #A0A0B0;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  margin-bottom: 0.6rem;
+}
+
+.terms-paragraph strong {
+  color: #FFFFFF;
+  font-weight: 700;
+}
+
+.terms-bullets {
+  margin: 0 0 0.6rem 1.4rem;
+  padding: 0;
+}
+
+.terms-bullets li {
+  margin-bottom: 0.4rem;
+}
+
+.terms-bullets .terms-paragraph {
+  display: inline;
+  margin: 0;
+}
+
+.terms-disclaimer {
+  background-color: #404259;
+  border-radius: 12px;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+
+.terms-disclaimer p {
+  color: #A0A0B0;
+  font-size: 0.8rem;
+  font-style: italic;
+  line-height: 1.5;
+}
+
 /* ---- Shared MERA palette (dashboards) ---------------------------- */
 /* Same colors as .login-page/.login-card above — kept as vars here so
    every page in pages/hospital-admin/ and pages/ambulance-admin/ pulls

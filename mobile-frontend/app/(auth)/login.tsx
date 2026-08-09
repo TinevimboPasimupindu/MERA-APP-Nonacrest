@@ -167,6 +167,11 @@ export default function LoginScreen() {
         <Text style={styles.secureText}>🔒 Secure & HIPAA Compliant</Text>
       </View>
 
+      {/* Terms & Conditions — accessible before logging in */}
+      <TouchableOpacity onPress={() => router.push('/(auth)/terms-and-conditions' as any)}>
+        <Text style={styles.termsLink}>Terms & Conditions</Text>
+      </TouchableOpacity>
+
     </ScrollView>
   );
 }
@@ -349,5 +354,11 @@ const styles = StyleSheet.create({
   secureText: {
     color: Colors.textSecondary,
     fontSize: FontSizes.xs,
+  },
+  termsLink: {
+    color: Colors.textSecondary,
+    fontSize: FontSizes.xs,
+    textDecorationLine: 'underline',
+    marginTop: Spacing.md,
   },
 });

@@ -30,6 +30,7 @@ export default function RegisterScreen() {
   const [idNumber, setIdNumber] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -54,16 +55,32 @@ export default function RegisterScreen() {
       return;
     }
 
+    // Belt-and-suspenders alongside the Register button's disabled state
+    // below — the button already prevents reaching this point unchecked,
+    // but this guard means that stays true even if the button's guard
+    // ever changes.
+    if (!agreedToTerms) {
+      setError('You must agree to the Terms & Conditions to register.');
+      return;
+    }
+
     setLoading(true);
 
+    // popi_consent and terms_consent are two distinct fields the backend
+    // validates independently (PatientRegistrationSerializer.validate())
+    // — not the same consent. Both are set from this one checkbox
+    // deliberately: terms-and-conditions.tsx is a single combined
+    // document covering general terms AND POPIA/data-handling matters
+    // together (see PROJECT_CONTEXT.md), so agreeing to it genuinely
+    // covers both backend consent records, not just one of them.
     console.log('Sending registration data:', JSON.stringify({
       full_name: fullName,
       email,
       phone_number: phone,
       password,
       confirm_password: confirmPassword,
-      popi_consent: true,
-      terms_consent: true,
+      popi_consent: agreedToTerms,
+      terms_consent: agreedToTerms,
     }));
 
     try {
@@ -73,8 +90,8 @@ export default function RegisterScreen() {
         phone_number: phone,
         password,
         confirm_password: confirmPassword,
-        popi_consent: true,
-        terms_consent: true,
+        popi_consent: agreedToTerms,
+        terms_consent: agreedToTerms,
       });
 
       await saveToken(data.access, data.refresh);
@@ -191,11 +208,41 @@ export default function RegisterScreen() {
           />
         </View>
 
+        {/* Terms & Conditions consent — required, genuinely user-driven.
+            The checkbox and the "Terms & Conditions" link are separate tap
+            targets on purpose: tapping the link should only open the
+            document, never silently toggle consent as a side effect. */}
+        <View style={styles.consentRow}>
+          <TouchableOpacity
+            style={[styles.checkbox, agreedToTerms && styles.checkboxChecked]}
+            onPress={() => setAgreedToTerms((prev) => !prev)}
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: agreedToTerms }}
+          >
+            {agreedToTerms && <Text style={styles.checkmark}>✓</Text>}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.consentTextWrap}
+            onPress={() => setAgreedToTerms((prev) => !prev)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.consentText}>
+              I agree to the{' '}
+              <Text
+                style={styles.consentLink}
+                onPress={() => router.push('/(auth)/terms-and-conditions' as any)}
+              >
+                Terms & Conditions
+              </Text>
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Next Button */}
         <TouchableOpacity
-          style={styles.nextButton}
+          style={[styles.nextButton, !agreedToTerms && styles.nextButtonDisabled]}
           onPress={handleRegister}
-          disabled={loading}
+          disabled={loading || !agreedToTerms}
         >
           {loading ? (
             <ActivityIndicator color={Colors.white} />
@@ -296,12 +343,56 @@ const styles = StyleSheet.create({
     color: Colors.textPrimary,
     fontFamily: 'Inter_400Regular',
   },
+  consentRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginTop: 30,
+    gap: 12,
+  },
+  checkbox: {
+    width: 26,
+    height: 26,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: '#3B3E5B',
+    backgroundColor: '#2A2D45',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  checkboxChecked: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  checkmark: {
+    color: Colors.white,
+    fontSize: 16,
+    fontFamily: 'Inter_700Bold',
+    lineHeight: 18,
+  },
+  consentTextWrap: {
+    flex: 1,
+  },
+  consentText: {
+    color: Colors.textSecondary,
+    fontSize: 15,
+    fontFamily: 'Inter_400Regular',
+    lineHeight: 22,
+  },
+  consentLink: {
+    color: Colors.primary,
+    fontFamily: 'Inter_700Bold',
+    textDecorationLine: 'underline',
+  },
   nextButton: {
     backgroundColor: Colors.primary,
     borderRadius: 24,
     paddingVertical: 22,
     alignItems: 'center',
-    marginTop: 40,
+    marginTop: 24,
+  },
+  nextButtonDisabled: {
+    backgroundColor: '#2A2D45',
   },
   nextButtonText: {
     color: Colors.white,
