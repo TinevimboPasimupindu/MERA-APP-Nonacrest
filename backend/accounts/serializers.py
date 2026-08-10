@@ -670,10 +670,16 @@ class PasswordResetRequestSerializer(serializers.Serializer):
             expires_at=timezone.now() + timedelta(hours=1),
         )
 
-        # In production, send this via email (e.g. django.core.mail.send_mail).
-        # The frontend deep-links to: mera://reset-password?token=<token_value>
+        # In production, send this via email. If/when this gets wired up,
+        # it must go through Brevo's HTTP API the same way accounts/views.py
+        # ::_send_otp_email does — NOT django.core.mail.send_mail/Django's
+        # SMTP EmailBackend. Render's free tier blocks all outbound SMTP
+        # ports platform-wide (25/465/587), so an SMTP-based send cannot
+        # work on this host regardless of credentials — this bit the OTP
+        # feature for real (see PROJECT_CONTEXT.md) before Brevo replaced
+        # it there. The frontend deep-links to: mera://reset-password?token=<token_value>
         # For now, the token is available via the admin or a separate email task.
-        # TODO: wire up email sending here (Sendgrid / AWS SES recommended).
+        # TODO: wire up Brevo email sending here.
 
 
 class PasswordResetConfirmSerializer(serializers.Serializer):
