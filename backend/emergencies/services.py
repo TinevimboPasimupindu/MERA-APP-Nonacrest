@@ -191,7 +191,21 @@ def get_route(origin_lat: float, origin_lng: float, dest_lat: float, dest_lng: f
     }
 
     response = httpx.post(GOOGLE_ROUTES_URL, json=payload, headers=headers, timeout=10.0)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError:
+        # Google's error responses are JSON with a detailed "error" object
+        # (reason, message — e.g. "API not enabled", "billing not enabled",
+        # "API key not valid", quota exceeded, etc.). The status code alone
+        # (all the view's broad except currently logs, via %r on the
+        # exception) doesn't say which of those it is — log the full body
+        # here, where the response is in scope, then re-raise unchanged so
+        # the view's existing 503-on-failure behavior is untouched.
+        logger.error(
+            "Routes API request failed: %s %s — response body: %s",
+            response.status_code, response.reason_phrase, response.text,
+        )
+        raise
     data = response.json()
 
     routes = data.get("routes") or []
