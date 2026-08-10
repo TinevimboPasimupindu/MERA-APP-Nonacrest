@@ -1,1 +1,1 @@
-web: gunicorn mera_backend.wsgi --log-file -
+web: gunicorn mera_backend.wsgi --workers 1 --timeout 30 --log-file -
