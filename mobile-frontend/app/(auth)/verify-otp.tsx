@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, TouchableOpacity, TextInput, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { useState } from 'react';
 import { useLocalSearchParams } from 'expo-router';
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_700Bold } from '@expo-google-fonts/inter';
@@ -79,66 +79,78 @@ export default function VerifyOtpScreen() {
 
   return (
     <View style={styles.screen}>
-      <View style={styles.container}>
-        <View style={styles.headerContainer}>
-          <View style={styles.line} />
-          <Text style={styles.meraHeading}>MERA</Text>
-          <View style={styles.line} />
-        </View>
-
-        <Text style={styles.welcomeHeading}>Check Your Email</Text>
-        <Text style={styles.welcomeSubtitle}>
-          {email
-            ? `We sent a 6-digit verification code to ${email}.`
-            : 'We sent a 6-digit verification code to your email.'}
-        </Text>
-
-        {error ? (
-          <View style={styles.errorContainer}>
-            <Text style={styles.errorText}>{error}</Text>
+      {/* Same behavior split every other KeyboardAvoidingView in this
+          codebase uses (medical-intake.tsx, emergency-contacts.tsx,
+          medical-profile.tsx, the hospital registration steps, etc.) —
+          'padding' on iOS, 'height' on Android. Without this, the code
+          input and Verify button (below the vertically-centered content)
+          end up hidden behind the keyboard with no way to reach them
+          short of dismissing it first. */}
+      <KeyboardAvoidingView
+        style={styles.keyboardAvoiding}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <View style={styles.container}>
+          <View style={styles.headerContainer}>
+            <View style={styles.line} />
+            <Text style={styles.meraHeading}>MERA</Text>
+            <View style={styles.line} />
           </View>
-        ) : null}
 
-        {resendMessage ? (
-          <View style={styles.successContainer}>
-            <Text style={styles.successText}>{resendMessage}</Text>
-          </View>
-        ) : null}
-
-        <View style={styles.inputContainer}>
-          <Text style={styles.label}>VERIFICATION CODE</Text>
-          <TextInput
-            style={styles.codeInput}
-            placeholder="000000"
-            placeholderTextColor={Colors.textSecondary}
-            value={code}
-            onChangeText={(text) => setCode(text.replace(/[^0-9]/g, '').slice(0, 6))}
-            keyboardType="number-pad"
-            maxLength={6}
-            autoFocus
-            textAlign="center"
-          />
-        </View>
-
-        <TouchableOpacity
-          style={[styles.verifyButton, (loading || code.length !== 6) && styles.verifyButtonDisabled]}
-          onPress={handleVerify}
-          disabled={loading || code.length !== 6}
-        >
-          {loading ? (
-            <ActivityIndicator color={Colors.white} />
-          ) : (
-            <Text style={styles.verifyButtonText}>Verify</Text>
-          )}
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={handleResend} disabled={resending} style={styles.resendRow}>
-          <Text style={styles.resendText}>
-            {resending ? 'Sending…' : "Didn't get a code? "}
-            {!resending && <Text style={styles.resendLink}>Resend</Text>}
+          <Text style={styles.welcomeHeading}>Check Your Email</Text>
+          <Text style={styles.welcomeSubtitle}>
+            {email
+              ? `We sent a 6-digit verification code to ${email}.`
+              : 'We sent a 6-digit verification code to your email.'}
           </Text>
-        </TouchableOpacity>
-      </View>
+
+          {error ? (
+            <View style={styles.errorContainer}>
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          ) : null}
+
+          {resendMessage ? (
+            <View style={styles.successContainer}>
+              <Text style={styles.successText}>{resendMessage}</Text>
+            </View>
+          ) : null}
+
+          <View style={styles.inputContainer}>
+            <Text style={styles.label}>VERIFICATION CODE</Text>
+            <TextInput
+              style={styles.codeInput}
+              placeholder="000000"
+              placeholderTextColor={Colors.textSecondary}
+              value={code}
+              onChangeText={(text) => setCode(text.replace(/[^0-9]/g, '').slice(0, 6))}
+              keyboardType="number-pad"
+              maxLength={6}
+              autoFocus
+              textAlign="center"
+            />
+          </View>
+
+          <TouchableOpacity
+            style={[styles.verifyButton, (loading || code.length !== 6) && styles.verifyButtonDisabled]}
+            onPress={handleVerify}
+            disabled={loading || code.length !== 6}
+          >
+            {loading ? (
+              <ActivityIndicator color={Colors.white} />
+            ) : (
+              <Text style={styles.verifyButtonText}>Verify</Text>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity onPress={handleResend} disabled={resending} style={styles.resendRow}>
+            <Text style={styles.resendText}>
+              {resending ? 'Sending…' : "Didn't get a code? "}
+              {!resending && <Text style={styles.resendLink}>Resend</Text>}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
     </View>
   );
 }
@@ -147,6 +159,9 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     backgroundColor: Colors.background,
+  },
+  keyboardAvoiding: {
+    flex: 1,
   },
   container: {
     flex: 1,

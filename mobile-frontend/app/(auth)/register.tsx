@@ -259,35 +259,45 @@ export default function RegisterScreen() {
           )}
         </TouchableOpacity>
 
-        {/* OR Divider */}
-        <View style={styles.dividerRow}>
-          <View style={styles.dividerLine} />
-          <Text style={styles.dividerText}>OR</Text>
-          <View style={styles.dividerLine} />
-        </View>
+        {/* OR Divider + Google Button — both hidden together when Google
+            Sign-In isn't configured (missing EXPO_PUBLIC_GOOGLE_*_CLIENT_ID
+            env vars), rather than rendering an orphaned "OR" divider with
+            nothing beneath it. Google Sign-In is currently paused (see
+            PROJECT_CONTEXT.md) and those vars can legitimately be absent
+            in any given environment — the rest of this screen (the actual
+            registration form) must keep working regardless. */}
+        {google.isConfigured && (
+          <>
+            <View style={styles.dividerRow}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>OR</Text>
+              <View style={styles.dividerLine} />
+            </View>
 
-        {/* Google Button — same consent checkbox gates this as the Next
-            button above, for the same reason: a new account created via
-            Google still needs real, user-driven consent, not a
-            side-effect of tapping a button that happens to also send
-            popi_consent/terms_consent behind the scenes. */}
-        <TouchableOpacity
-          style={[
-            styles.googleButton,
-            (!agreedToTerms || google.loading || !google.canSignIn) && styles.googleButtonDisabled,
-          ]}
-          onPress={google.signIn}
-          disabled={!agreedToTerms || google.loading || !google.canSignIn}
-        >
-          {google.loading ? (
-            <ActivityIndicator color="#4285F4" />
-          ) : (
-            <>
-              <FontAwesome name="google" size={24} color="#4285F4" style={{ marginRight: 16 }} />
-              <Text style={styles.googleButtonText}>Continue with Google</Text>
-            </>
-          )}
-        </TouchableOpacity>
+            {/* Google Button — same consent checkbox gates this as the
+                Next button above, for the same reason: a new account
+                created via Google still needs real, user-driven consent,
+                not a side-effect of tapping a button that happens to also
+                send popi_consent/terms_consent behind the scenes. */}
+            <TouchableOpacity
+              style={[
+                styles.googleButton,
+                (!agreedToTerms || google.loading || !google.canSignIn) && styles.googleButtonDisabled,
+              ]}
+              onPress={google.signIn}
+              disabled={!agreedToTerms || google.loading || !google.canSignIn}
+            >
+              {google.loading ? (
+                <ActivityIndicator color="#4285F4" />
+              ) : (
+                <>
+                  <FontAwesome name="google" size={24} color="#4285F4" style={{ marginRight: 16 }} />
+                  <Text style={styles.googleButtonText}>Continue with Google</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </>
+        )}
 
         {/* Sign In Link */}
         <View style={styles.signInRow}>

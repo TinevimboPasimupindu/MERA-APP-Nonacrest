@@ -21,6 +21,21 @@ export default function PatientDashboardScreen() {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [triggering, setTriggering] = useState(false);
+  const [user, setUser] = useState<any>(null);
+
+  useEffect(() => {
+    const fetchUser = async () => {
+      try {
+        const data = await apiCall(ENDPOINTS.me, 'GET', undefined, true);
+        setUser(data);
+      } catch (err) {
+        console.log('Error fetching user:', err);
+      }
+    };
+    fetchUser();
+  }, []);
+
+  const firstName = user?.full_name?.trim().split(/\s+/)[0] || 'there';
 
   useEffect(() => {
     const pulse = Animated.loop(
@@ -126,7 +141,7 @@ export default function PatientDashboardScreen() {
       <View style={styles.header}>
         <View>
           <Text style={styles.appName}>MERA</Text>
-          <Text style={styles.greeting}>Hello, Sarah</Text>
+          <Text style={styles.greeting}>Hello, {firstName}</Text>
         </View>
 
         <View style={styles.headerRight}>
