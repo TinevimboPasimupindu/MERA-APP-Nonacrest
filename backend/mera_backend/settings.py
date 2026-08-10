@@ -30,6 +30,46 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 # frontend. See emergencies/services.py::get_route(), the only place this
 # is read.
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
+# Google OAuth client IDs — NOT secrets in the usual sense (client IDs are
+# meant to be public and are already embedded in the mobile app as
+# EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID / EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID), but
+# they live here rather than hardcoded because accounts/serializers.py
+# checks the verified Google ID token's `aud` claim against them — a token
+# minted for a different app must not be accepted.
+#
+# Both are needed, not just the Web one, because of how
+# expo-auth-session/providers/google actually behaves (confirmed by
+# reading its installed source, not assumed): it picks the client id via
+# Platform.select({ios: 'iosClientId', android: ..., default: 'webClientId'})
+# — keyed on Platform.OS, which is 'ios' when running in Expo Go on an iOS
+# device/simulator, NOT whether the build is "standalone" or not. So even
+# under this project's current Expo-Go-only dev workflow, a real device
+# test on iOS mints a token audienced to the iOS client id, not the Web
+# one — a Web-only audience check would reject every real iOS test.
+# Android is deferred (no SHA-1 fingerprint / Android client set up yet —
+# see PROJECT_CONTEXT.md), so there's no GOOGLE_ANDROID_CLIENT_ID here.
+GOOGLE_WEB_CLIENT_ID = os.environ.get("GOOGLE_WEB_CLIENT_ID")
+GOOGLE_IOS_CLIENT_ID = os.environ.get("GOOGLE_IOS_CLIENT_ID")
+
+# Email — Gmail SMTP, used for the patient-login email OTP step (see
+# accounts/views.py::LoginView / VerifyOTPView / ResendOTPView). This is
+# the first real outbound email in this backend — PasswordResetRequestSerializer
+# still only stubs email sending (see that serializer's own comment). Django's
+# test runner automatically swaps EMAIL_BACKEND for an in-memory one during
+# `manage.py test` (captured in django.core.mail.outbox), so tests never hit
+# real Gmail SMTP regardless of what's configured here or whether
+# EMAIL_HOST_USER/PASSWORD are set in a given environment's .env.
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = "smtp.gmail.com"
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER")
+# A Gmail *app password*, not the account's real login password — Gmail
+# requires this for SMTP access when 2FA is enabled on the sending account
+# (and rejects the real password outright if it is). Same "secrets never go
+# in Git" rule as every other credential in this project.
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD")
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 

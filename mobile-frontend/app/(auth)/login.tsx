@@ -8,6 +8,7 @@ import { FontAwesome } from '@expo/vector-icons';
 import { Ionicons } from '@expo/vector-icons';
 import { apiCall, ENDPOINTS, saveToken } from '../../services/api';
 import { routeAfterAuth } from '../../utils/route-after-auth';
+import { useGoogleSignIn } from '../../hooks/use-google-signin';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -16,6 +17,14 @@ export default function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // No consent flags passed — this screen has no checkbox to source them
+  // from. A brand-new Google email tapped here comes back with
+  // needs_registration (surfaced as google.error below) rather than the
+  // account being silently created with no consent ever collected; see
+  // accounts/views.py::GoogleSignInView and register.tsx's own Google
+  // button, which does send real consent from its checkbox.
+  const google = useGoogleSignIn();
 
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -34,6 +43,20 @@ export default function LoginScreen() {
     setLoading(true);
     try {
       const data = await apiCall(ENDPOINTS.login, 'POST', { email, password });
+
+      // Patients get an OTP-required response here instead of tokens —
+      // see accounts/views.py::LoginView. Every other role's response is
+      // unchanged (tokens directly), so this branch is the only new thing
+      // in this handler; the else path below is exactly what this
+      // function already did before the OTP step existed.
+      if (data.otp_required) {
+        router.replace({
+          pathname: '/(auth)/verify-otp' as any,
+          params: { userId: data.user_id, email },
+        });
+        return;
+      }
+
       await saveToken(data.access, data.refresh);
 
       // Lands back in an in-progress emergency (active SOS / assigned
@@ -68,9 +91,9 @@ export default function LoginScreen() {
       <Text style={styles.welcomeSubtitle}>Sign in to your account</Text>
 
       {/* Error Message */}
-      {error ? (
+      {(error || google.error) ? (
         <View style={styles.errorContainer}>
-          <Text style={styles.errorText}>{error}</Text>
+          <Text style={styles.errorText}>{error || google.error}</Text>
         </View>
       ) : null}
 
@@ -152,14 +175,24 @@ export default function LoginScreen() {
       </TouchableOpacity>
 
       {/* Google Button */}
-      <TouchableOpacity style={styles.googleButton}>
-        <FontAwesome
-          name="google"
-          size={30}
-          color="#4285F4"
-          style={{ marginRight: 20 }}
-        />
-        <Text style={styles.googleButtonText}>Continue with Google</Text>
+      <TouchableOpacity
+        style={[styles.googleButton, (google.loading || !google.canSignIn) && styles.googleButtonDisabled]}
+        onPress={google.signIn}
+        disabled={google.loading || !google.canSignIn}
+      >
+        {google.loading ? (
+          <ActivityIndicator color="#4285F4" />
+        ) : (
+          <>
+            <FontAwesome
+              name="google"
+              size={30}
+              color="#4285F4"
+              style={{ marginRight: 20 }}
+            />
+            <Text style={styles.googleButtonText}>Continue with Google</Text>
+          </>
+        )}
       </TouchableOpacity>
 
       {/* Secure Badge */}
@@ -347,6 +380,9 @@ const styles = StyleSheet.create({
   googleButtonText: {
     color: '#000000',
     fontSize: FontSizes.md,
+  },
+  googleButtonDisabled: {
+    opacity: 0.6,
   },
   secureBadge: {
     marginTop: Spacing.sm,

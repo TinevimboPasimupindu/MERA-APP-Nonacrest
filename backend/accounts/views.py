@@ -6,8 +6,15 @@
 # Role enforced permanently at registration
 # Institutional accounts start pending
 # Account locked after 5 failed login attempts
+# Email OTP second factor after password (patients only)
 
+import secrets
+from datetime import timedelta
+
+from django.core.exceptions import ValidationError
+from django.core.mail import send_mail
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -17,7 +24,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.permissions import IsAmbulanceService, IsMERAAdmin
 from emergencies.models import Incident
-from .models import AMBULANCE_ROLES, HOSPITAL_ROLES, InstitutionalStatus, Role, User
+from .models import AMBULANCE_ROLES, EmailOTP, HOSPITAL_ROLES, InstitutionalStatus, Role, User
 from .serializers import (
     AdminUserEditSerializer,
     AdminUserListSerializer,
@@ -26,6 +33,7 @@ from .serializers import (
     AvailabilityToggleSerializer,
     EMTCreationSerializer,
     EMTUpdateSerializer,
+    GoogleSignInSerializer,
     HospitalAdminCreationSerializer,
     HospitalRegistrationSerializer,
     InstitutionalDocumentSerializer,
@@ -34,7 +42,15 @@ from .serializers import (
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
     UserSummarySerializer,
+    VerifyOTPSerializer,
 )
+
+# OTP validity window and how often a user may have a new one generated
+# (via login or resend) — see _generate_and_send_otp's own comment and
+# PROJECT_CONTEXT.md for the full rate-limiting reasoning.
+OTP_VALIDITY_MINUTES = 5
+OTP_MAX_PER_WINDOW = 3
+OTP_GENERATION_WINDOW_MINUTES = 10
 
 
 def _search_filter(queryset, search: str):
@@ -65,6 +81,59 @@ def _token_response(user: User) -> dict:
         "user": UserSummarySerializer(user).data,
     }
 
+
+def _generate_and_send_otp(user: User) -> bool:
+    # Shared by LoginView (post-password) and ResendOTPView, so the
+    # generation rate limit applies identically regardless of which one
+    # triggered it — a resend-only limit would be trivially bypassed by
+    # just logging in again with the correct password.
+    #
+    # Rate-limiting reasoning (two distinct concerns, not one):
+    #   - THIS function throttles *generation*: at most OTP_MAX_PER_WINDOW
+    #     new codes per user per OTP_GENERATION_WINDOW_MINUTES. Generating
+    #     a code sends a real email, so an unthrottled caller could spam a
+    #     target's inbox, or burn through this app's Gmail sending quota,
+    #     just by hitting login (or resend) repeatedly with a correct
+    #     password. 3 per 10 minutes is deliberately generous for the
+    #     legitimate case (typo'd the code, let it expire, resent once or
+    #     twice) while still bounding the total volume to a handful, not
+    #     unlimited.
+    #   - The SEPARATE concern — brute-forcing a live code's 6-digit space
+    #     — is throttled elsewhere, per-code, via EmailOTP.attempts /
+    #     OTP_MAX_VERIFY_ATTEMPTS in VerifyOTPSerializer. That's a guess
+    #     limit, not a generation limit; the two don't substitute for each
+    #     other, which is why both exist.
+    window_start = timezone.now() - timedelta(minutes=OTP_GENERATION_WINDOW_MINUTES)
+    recent_count = EmailOTP.objects.filter(user=user, created_at__gte=window_start).count()
+    if recent_count >= OTP_MAX_PER_WINDOW:
+        return False
+
+    # Only one *live* code at a time — invalidate any still-unused ones
+    # before issuing a new one (same pattern PasswordResetRequestSerializer
+    # already uses for reset tokens), so VerifyOTPSerializer never has to
+    # guess which of several unused rows is "the" current code.
+    EmailOTP.objects.filter(user=user, used=False).update(used=True)
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    EmailOTP.objects.create(
+        user=user,
+        code=code,
+        expires_at=timezone.now() + timedelta(minutes=OTP_VALIDITY_MINUTES),
+    )
+
+    send_mail(
+        subject="Your MERA verification code",
+        message=(
+            f"Your MERA login verification code is {code}.\n\n"
+            f"This code expires in {OTP_VALIDITY_MINUTES} minutes. "
+            "If you didn't try to log in, you can ignore this email."
+        ),
+        from_email=None,  # falls back to settings.DEFAULT_FROM_EMAIL
+        recipient_list=[user.email],
+        fail_silently=False,
+    )
+    return True
+
 # Patient Registration
 
 class PatientRegisterView(APIView):
@@ -74,6 +143,88 @@ class PatientRegisterView(APIView):
         serializer = PatientRegistrationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
+        return Response(
+            {
+                "message": "Registration successful. Please complete your medical intake form.",
+                **_token_response(user),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+# Google Sign-In — patients only (see PROJECT_CONTEXT.md, "Key principle:
+# only Patients self-register"; this is an alternative to email/password
+# for that same flow, not a new self-registration path for any other role).
+
+class GoogleSignInView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = GoogleSignInSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.google_payload
+        email = payload["email"].strip().lower()
+        name = (payload.get("name") or "").strip()
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            user = None
+
+        if user is not None:
+            # Existing account, but not a patient — reject clearly rather
+            # than silently logging the caller into an ambulance_admin/
+            # hospital_admin/etc. account just because the email matched.
+            if user.role != Role.PATIENT:
+                return Response(
+                    {"detail": (
+                        "An account with this email already exists for a different role. "
+                        "Google sign-in is only available for patient accounts."
+                    )},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            # Same deactivation check LoginView applies to the email/
+            # password path — Google sign-in isn't a way around
+            # DeactivateUserView; a deactivated patient still can't get in.
+            if not user.is_active:
+                return Response(
+                    {"detail": "This account has been deactivated. Contact your administrator."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            return Response(_token_response(user), status=status.HTTP_200_OK)
+
+        # No existing account — create one, but only with real consent.
+        # popi_consent/terms_consent mirror PatientRegistrationSerializer's
+        # own fields and are only asked for here because there's a new
+        # account to gate: an existing account (handled above) already
+        # went through consent at whatever point it was originally
+        # registered. register.tsx sends these from its own checkbox;
+        # login.tsx's Google button deliberately doesn't collect consent
+        # at all, so it never sends them — that request lands here instead,
+        # gets needs_registration back, and the frontend sends the user to
+        # register.tsx rather than fabricating consent that was never given.
+        if not (request.data.get("popi_consent") and request.data.get("terms_consent")):
+            return Response(
+                {
+                    "detail": "No account found for this Google email. Please complete registration first.",
+                    "needs_registration": True,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # No password kwarg — User.objects.create_user()'s default
+        # password=None flows into AbstractBaseUser.set_password(None),
+        # which Django's make_password(None) produces an unusable-password
+        # hash (verified: has_usable_password() is False, check_password()
+        # rejects everything including None/'') — the same effect as
+        # calling set_unusable_password() explicitly, for free, by simply
+        # not passing a password. This account can never log in via the
+        # email/password form; only Google again.
+        user = User.objects.create_user(
+            email=email,
+            role=Role.PATIENT,
+            institutional_status=InstitutionalStatus.APPROVED,
+            full_name=name,
+        )
         return Response(
             {
                 "message": "Registration successful. Please complete your medical intake form.",
@@ -214,7 +365,64 @@ class LoginView(APIView):
         #         )
 
         user.reset_login_attempts()
+
+        # Email OTP second factor — patients only, per project scope
+        # (mobile self-registration/login is patient-only; EMTs and every
+        # web-side role keep logging in with just email/password, exactly
+        # as before this change — nothing below this branch changed).
+        if user.role == Role.PATIENT:
+            sent = _generate_and_send_otp(user)
+            if not sent:
+                return Response(
+                    {"detail": "Too many verification codes requested. Please wait a few minutes and try again."},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+            return Response(
+                {"otp_required": True, "user_id": str(user.id)},
+                status=status.HTTP_200_OK,
+            )
+
         return Response(_token_response(user), status=status.HTTP_200_OK)
+
+# Email OTP — second factor after email/password (patients only)
+
+class VerifyOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = VerifyOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data["user"]
+        return Response(_token_response(user), status=status.HTTP_200_OK)
+
+
+class ResendOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        try:
+            user = User.objects.get(id=request.data.get("user_id"), role=Role.PATIENT)
+        except (User.DoesNotExist, ValueError, TypeError, ValidationError):
+            # user_id is an opaque UUID the client already holds from the
+            # login response, not something worth anti-enumeration effort
+            # over (unlike email, it isn't guessable/probeable) — a plain
+            # 404 here is more useful to a legitimate caller than a faked
+            # success would be.
+            return Response(
+                {"detail": "Invalid session. Please log in again."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        sent = _generate_and_send_otp(user)
+        if not sent:
+            return Response(
+                {"detail": "Too many verification codes requested. Please wait a few minutes and try again."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        return Response(
+            {"otp_required": True, "user_id": str(user.id)},
+            status=status.HTTP_200_OK,
+        )
 
 # Password Reset
 

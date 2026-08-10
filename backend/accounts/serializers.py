@@ -8,11 +8,15 @@
 import secrets
 from datetime import timedelta
 
+from django.conf import settings
 from django.utils import timezone
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 from rest_framework import serializers
 
 from .models import (
     AMBULANCE_ROLES,
+    EmailOTP,
     HOSPITAL_ROLES,
     InstitutionalDocument,
     InstitutionalStatus,
@@ -20,6 +24,10 @@ from .models import (
     Role,
     User,
 )
+
+# Guess-attempt cap on a single OTP code — see EmailOTP.attempts' comment
+# in accounts/models.py for why this is per-code, not per-user/permanent.
+OTP_MAX_VERIFY_ATTEMPTS = 5
 
 # Shared helpers
 
@@ -103,6 +111,74 @@ class PatientRegistrationSerializer(serializers.ModelSerializer):
             institutional_status=InstitutionalStatus.APPROVED,
             **validated_data,
         )
+
+# Google Sign-In (patients only — see "Key principle: only Patients
+# self-register" in PROJECT_CONTEXT.md. This is an alternative to
+# email/password for that same self-registration flow, not a new way for
+# any other role to get an account.)
+
+def _accepted_google_client_ids() -> set:
+    return {
+        cid for cid in (settings.GOOGLE_WEB_CLIENT_ID, settings.GOOGLE_IOS_CLIENT_ID) if cid
+    }
+
+
+def _verify_google_id_token(token: str) -> dict:
+    # Server-side verification via Google's own library (google-auth) —
+    # never trust a client-supplied token blindly. verify_oauth2_token
+    # validates the cryptographic signature against Google's published
+    # public keys (fetched over the network via the google_requests.Request
+    # transport), the issuer, and expiry. audience=None here deliberately
+    # skips verify_oauth2_token's own single-audience check — the `aud`
+    # claim is checked manually below against a *set* of this app's client
+    # ids instead (Google's own documented pattern for apps with multiple
+    # platform clients: https://developers.google.com/identity/sign-in/web/backend-auth).
+    #
+    # Multiple client ids matter here, not just the Web one: this app's
+    # dev workflow is plain Expo Go (no dev-client/EAS build), and
+    # expo-auth-session/providers/google's client-id selection is keyed on
+    # Platform.select({ios: 'iosClientId', ..., default: 'webClientId'})
+    # — i.e. Platform.OS, not "is this a standalone build" (confirmed by
+    # reading the installed library's source, not assumed). Expo Go on an
+    # iOS device/simulator reports Platform.OS === 'ios', so a real iOS
+    # test mints a token audienced to GOOGLE_IOS_CLIENT_ID, not the Web
+    # one — a Web-only check would reject every real iOS sign-in attempt.
+    try:
+        idinfo = google_id_token.verify_oauth2_token(
+            token, google_requests.Request(), audience=None,
+        )
+    except Exception:  # noqa: BLE001 — mirrors emergencies/services.py's broad-except handling of external API/token failures; any failure here (bad signature, expired, malformed token, network error fetching Google's certs) means "don't trust this token"
+        raise serializers.ValidationError({"id_token": "Invalid or expired Google token."})
+
+    accepted = _accepted_google_client_ids()
+    if not accepted or idinfo.get("aud") not in accepted:
+        raise serializers.ValidationError({"id_token": "Invalid or expired Google token."})
+    if not idinfo.get("email_verified", False):
+        raise serializers.ValidationError({"id_token": "Google account email is not verified."})
+    if not idinfo.get("email"):
+        raise serializers.ValidationError({"id_token": "Google token did not include an email address."})
+    return idinfo
+
+
+class GoogleSignInSerializer(serializers.Serializer):
+    # Deliberately thin — just verifies the token and exposes the decoded
+    # claims via .google_payload for the view to read after is_valid().
+    # The actual link/create/reject decision lives in GoogleSignInView
+    # (accounts/views.py) rather than here, matching how LoginView already
+    # does all of its own branching directly in the view rather than
+    # delegating to a serializer — this endpoint is fundamentally a login
+    # action (with an optional account-creation side effect), not a
+    # straightforward "validate input, create one model instance" case a
+    # ModelSerializer.create() fits naturally.
+    id_token = serializers.CharField(write_only=True)
+
+    def validate_id_token(self, value):
+        self._google_payload = _verify_google_id_token(value)
+        return value
+
+    @property
+    def google_payload(self) -> dict:
+        return self._google_payload
 
 # Hospital registration (step 1 + 2 combined, docs in step 3)
 
@@ -636,6 +712,57 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
         reset_token.used = True
         reset_token.save(update_fields=["used"])
+
+# Email OTP verification — second factor after email/password (patients
+# only, see LoginView). Deliberately a serializer rather than logic
+# inlined in the view (unlike GoogleSignInView, which is closer to plain
+# credential-checking) — this is a "verify a stored code, act on it" case,
+# the same shape as PasswordResetConfirmSerializer just above, and that's
+# the closer precedent to follow here.
+
+class VerifyOTPSerializer(serializers.Serializer):
+    user_id = serializers.UUIDField()
+    code = serializers.CharField(min_length=6, max_length=6)
+
+    def validate(self, data):
+        # Same generic message regardless of *why* verification failed
+        # (no such user, no live code, wrong code, too many attempts) —
+        # mirrors LoginView's own "Invalid credentials" anti-enumeration
+        # convention rather than telling a caller which part was wrong.
+        generic_error = {"detail": "Invalid or expired code."}
+
+        try:
+            user = User.objects.get(id=data["user_id"], role=Role.PATIENT)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(generic_error)
+
+        otp = (
+            EmailOTP.objects.filter(user=user, used=False)
+            .order_by("-created_at")
+            .first()
+        )
+        if otp is None or not otp.is_valid:
+            raise serializers.ValidationError(generic_error)
+
+        if otp.attempts >= OTP_MAX_VERIFY_ATTEMPTS:
+            # Burn this code outright rather than leaving it live to keep
+            # counting attempts forever — recovery is "request a new one"
+            # (ResendOTPView), not something this endpoint can fix.
+            otp.used = True
+            otp.save(update_fields=["used"])
+            raise serializers.ValidationError(
+                {"detail": "Too many incorrect attempts. Please request a new code."}
+            )
+
+        if otp.code != data["code"]:
+            otp.attempts += 1
+            otp.save(update_fields=["attempts"])
+            raise serializers.ValidationError(generic_error)
+
+        otp.used = True
+        otp.save(update_fields=["used"])
+        data["user"] = user
+        return data
 
 # Ambulance availability toggle
 
