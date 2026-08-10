@@ -6,6 +6,9 @@ export const BASE_URL = 'https://mera-app-nonacrest.onrender.com/api';
 export const ENDPOINTS = {
   // Auth
   login: '/auth/login/',
+  verifyOtp: '/auth/verify-otp/',
+  resendOtp: '/auth/resend-otp/',
+  googleSignIn: '/auth/google/',
   registerPatient: '/auth/register/patient/',
   registerHospital: '/auth/register/hospital/',
   registerAmbulance: '/auth/register/ambulance/',

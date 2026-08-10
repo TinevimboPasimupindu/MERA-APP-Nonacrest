@@ -2,14 +2,18 @@
 
 
 import uuid
+from datetime import timedelta
+from unittest.mock import patch
 
-from django.test import TestCase
+from django.core import mail
+from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from emergencies.models import Incident, IncidentStatus
-from .models import InstitutionalStatus, Role, User
+from .models import EmailOTP, InstitutionalStatus, Role, User
 
 
 class PatientRegistrationTest(TestCase):
@@ -97,14 +101,19 @@ class LoginTest(TestCase):
             full_name="Test Patient",
         )
 
-    def test_successful_login(self):
+    def test_successful_login_requires_otp_for_patient(self):
+        # Patients now get an OTP-required response instead of tokens
+        # directly — see GoogleSignInTest... no, see the OTP test classes
+        # below for the full two-step round trip (login -> verify-otp).
         response = self.client.post(self.url, {
             "email": "patient@example.com",
             "password": "TestPass123!",
         })
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn("access", response.data)
-        self.assertIn("refresh", response.data)
+        self.assertTrue(response.data.get("otp_required"))
+        self.assertEqual(response.data.get("user_id"), str(self.user.id))
+        self.assertNotIn("access", response.data)
+        self.assertNotIn("refresh", response.data)
 
     def test_wrong_password_increments_counter(self):
         self.client.post(self.url, {"email": "patient@example.com", "password": "wrong"})
@@ -136,6 +145,333 @@ class LoginTest(TestCase):
             "password": "TestPass123!",
         })
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+@override_settings(GOOGLE_WEB_CLIENT_ID="test-web-client-id", GOOGLE_IOS_CLIENT_ID="test-ios-client-id")
+class GoogleSignInTest(TestCase):
+    # The real Google verification call is never hit in tests —
+    # accounts.serializers.google_id_token.verify_oauth2_token is mocked
+    # directly (same approach emergencies/tests.py uses for the Routes API:
+    # mock the one line that actually calls the external service, not the
+    # whole HTTP stack), so no network call happens and no real Google
+    # client/credentials are needed to run this suite. GOOGLE_WEB_CLIENT_ID/
+    # GOOGLE_IOS_CLIENT_ID are overridden here the same way RouteEndpointTest
+    # overrides GOOGLE_MAPS_API_KEY, since the real dev .env may not have
+    # them set.
+
+    def setUp(self):
+        self.client = APIClient()
+        self.url = reverse("google-signin")
+
+    def _mock_payload(self, email="newpatient@example.com", name="New Patient", email_verified=True):
+        return {
+            "email": email,
+            "email_verified": email_verified,
+            "name": name,
+            "sub": "1234567890",
+            "aud": "test-web-client-id",
+            "iss": "accounts.google.com",
+        }
+
+    @patch("accounts.serializers.google_id_token.verify_oauth2_token")
+    def test_new_account_created_with_consent(self, mock_verify):
+        mock_verify.return_value = self._mock_payload()
+        response = self.client.post(self.url, {
+            "id_token": "fake-token",
+            "popi_consent": True,
+            "terms_consent": True,
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn("access", response.data)
+        user = User.objects.get(email="newpatient@example.com")
+        self.assertEqual(user.role, Role.PATIENT)
+        self.assertEqual(user.full_name, "New Patient")
+        self.assertEqual(user.institutional_status, InstitutionalStatus.APPROVED)
+        # Google-authenticated account — no password to check, and
+        # verifying nothing was ever set that would make one usable.
+        self.assertFalse(user.has_usable_password())
+
+    @patch("accounts.serializers.google_id_token.verify_oauth2_token")
+    def test_new_account_requires_consent(self, mock_verify):
+        mock_verify.return_value = self._mock_payload(email="noconsent@example.com")
+        response = self.client.post(self.url, {"id_token": "fake-token"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(response.data.get("needs_registration"))
+        self.assertFalse(User.objects.filter(email="noconsent@example.com").exists())
+
+    @patch("accounts.serializers.google_id_token.verify_oauth2_token")
+    def test_links_to_existing_patient_account(self, mock_verify):
+        existing = User.objects.create_user(
+            email="existingpatient@example.com",
+            password="SomePassword123!",
+            role=Role.PATIENT,
+            full_name="Existing Patient",
+        )
+        mock_verify.return_value = self._mock_payload(email="existingpatient@example.com")
+        response = self.client.post(self.url, {"id_token": "fake-token"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertEqual(response.data["user"]["id"], str(existing.id))
+        # No duplicate account created for the same email.
+        self.assertEqual(User.objects.filter(email="existingpatient@example.com").count(), 1)
+
+    @patch("accounts.serializers.google_id_token.verify_oauth2_token")
+    def test_rejects_existing_non_patient_role(self, mock_verify):
+        User.objects.create_user(
+            email="ambulance@example.com",
+            password="SomePassword123!",
+            role=Role.AMBULANCE_SERVICE,
+            service_name="Test EMS",
+        )
+        mock_verify.return_value = self._mock_payload(email="ambulance@example.com")
+        response = self.client.post(self.url, {"id_token": "fake-token"})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertNotIn("access", response.data)
+
+    @patch("accounts.serializers.google_id_token.verify_oauth2_token")
+    def test_rejects_deactivated_existing_patient(self, mock_verify):
+        User.objects.create_user(
+            email="deactivated@example.com",
+            password="SomePassword123!",
+            role=Role.PATIENT,
+            is_active=False,
+        )
+        mock_verify.return_value = self._mock_payload(email="deactivated@example.com")
+        response = self.client.post(self.url, {"id_token": "fake-token"})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch("accounts.serializers.google_id_token.verify_oauth2_token")
+    def test_rejects_invalid_or_unverifiable_token(self, mock_verify):
+        mock_verify.side_effect = ValueError("Token used too late")
+        response = self.client.post(self.url, {"id_token": "garbage"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(User.objects.count(), 0)
+
+    @patch("accounts.serializers.google_id_token.verify_oauth2_token")
+    def test_accepts_ios_client_id_audience(self, mock_verify):
+        # A token minted via the iOS client (what Expo Go on a real iOS
+        # device actually produces — see the reasoning note in
+        # accounts/serializers.py::_verify_google_id_token) must be
+        # accepted, not just a Web-client-audienced token.
+        payload = self._mock_payload(email="iosuser@example.com")
+        payload["aud"] = "test-ios-client-id"
+        mock_verify.return_value = payload
+        response = self.client.post(self.url, {
+            "id_token": "fake-token",
+            "popi_consent": True,
+            "terms_consent": True,
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(User.objects.filter(email="iosuser@example.com").exists())
+
+    @patch("accounts.serializers.google_id_token.verify_oauth2_token")
+    def test_rejects_token_for_unrecognized_client(self, mock_verify):
+        # A token that's otherwise well-formed but wasn't minted for this
+        # app at all (some other Google client) must not be accepted.
+        payload = self._mock_payload()
+        payload["aud"] = "some-other-apps-client-id"
+        mock_verify.return_value = payload
+        response = self.client.post(self.url, {
+            "id_token": "fake-token",
+            "popi_consent": True,
+            "terms_consent": True,
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(User.objects.count(), 0)
+
+    @patch("accounts.serializers.google_id_token.verify_oauth2_token")
+    def test_rejects_unverified_email(self, mock_verify):
+        mock_verify.return_value = self._mock_payload(email_verified=False)
+        response = self.client.post(self.url, {
+            "id_token": "fake-token",
+            "popi_consent": True,
+            "terms_consent": True,
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_missing_token_rejected(self):
+        response = self.client.post(self.url, {})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class EmailOTPLoginTest(TestCase):
+    # Second factor on top of patient login — patients only (see LoginView).
+    # Django's test runner automatically swaps EMAIL_BACKEND for an
+    # in-memory one during `manage.py test` (captured in
+    # django.core.mail.outbox), so these never hit real Gmail SMTP —
+    # no @override_settings needed for that, unlike GOOGLE_MAPS_API_KEY/
+    # GOOGLE_WEB_CLIENT_ID elsewhere, which aren't part of Django's own
+    # testing-aware subsystems.
+
+    def setUp(self):
+        self.client = APIClient()
+        self.login_url = reverse("login")
+        self.verify_url = reverse("verify-otp")
+        self.resend_url = reverse("resend-otp")
+        self.user = User.objects.create_user(
+            email="otp-patient@example.com",
+            password="TestPass123!",
+            role=Role.PATIENT,
+            full_name="OTP Patient",
+        )
+
+    def _login(self):
+        return self.client.post(self.login_url, {
+            "email": "otp-patient@example.com",
+            "password": "TestPass123!",
+        })
+
+    def test_login_sends_otp_instead_of_tokens(self):
+        response = self._login()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data.get("otp_required"))
+        self.assertEqual(response.data.get("user_id"), str(self.user.id))
+        self.assertNotIn("access", response.data)
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["otp-patient@example.com"])
+        otp = EmailOTP.objects.get(user=self.user, used=False)
+        self.assertEqual(len(otp.code), 6)
+        self.assertTrue(otp.code.isdigit())
+        self.assertIn(otp.code, mail.outbox[0].body)
+
+    def test_correct_otp_returns_tokens(self):
+        self._login()
+        otp = EmailOTP.objects.get(user=self.user, used=False)
+
+        response = self.client.post(self.verify_url, {
+            "user_id": str(self.user.id),
+            "code": otp.code,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+        otp.refresh_from_db()
+        self.assertTrue(otp.used)
+
+    def test_wrong_code_rejected(self):
+        self._login()
+        otp = EmailOTP.objects.get(user=self.user, used=False)
+        wrong_code = "000000" if otp.code != "000000" else "111111"
+
+        response = self.client.post(self.verify_url, {
+            "user_id": str(self.user.id),
+            "code": wrong_code,
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        otp.refresh_from_db()
+        self.assertEqual(otp.attempts, 1)
+        self.assertFalse(otp.used)
+
+    def test_expired_code_rejected(self):
+        self._login()
+        otp = EmailOTP.objects.get(user=self.user, used=False)
+        otp.expires_at = timezone.now() - timedelta(minutes=1)
+        otp.save(update_fields=["expires_at"])
+
+        response = self.client.post(self.verify_url, {
+            "user_id": str(self.user.id),
+            "code": otp.code,
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_already_used_code_rejected(self):
+        self._login()
+        otp = EmailOTP.objects.get(user=self.user, used=False)
+        data = {"user_id": str(self.user.id), "code": otp.code}
+
+        first = self.client.post(self.verify_url, data)
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+
+        second = self.client.post(self.verify_url, data)
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_guess_attempts_cap_burns_the_code(self):
+        # After enough wrong guesses, even the *correct* code stops
+        # working — the live code is burned outright, forcing a resend,
+        # rather than leaving it guessable indefinitely.
+        self._login()
+        otp = EmailOTP.objects.get(user=self.user, used=False)
+        wrong_code = "000000" if otp.code != "000000" else "111111"
+
+        for _ in range(5):
+            self.client.post(self.verify_url, {"user_id": str(self.user.id), "code": wrong_code})
+
+        response = self.client.post(self.verify_url, {
+            "user_id": str(self.user.id),
+            "code": otp.code,
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_generation_rate_limit_blocks_excess_logins(self):
+        # 3 logins (each generates a code) succeed; the 4th, still inside
+        # the same window, is rate-limited rather than sending a 4th email.
+        for _ in range(3):
+            response = self._login()
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertTrue(response.data.get("otp_required"))
+
+        fourth = self._login()
+        self.assertEqual(fourth.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(len(mail.outbox), 3)
+
+    def test_resend_issues_a_new_code_and_invalidates_the_old_one(self):
+        self._login()
+        first_otp = EmailOTP.objects.get(user=self.user, used=False)
+
+        response = self.client.post(self.resend_url, {"user_id": str(self.user.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data.get("otp_required"))
+        self.assertEqual(len(mail.outbox), 2)
+
+        first_otp.refresh_from_db()
+        self.assertTrue(first_otp.used)  # invalidated by the resend
+
+        new_otp = EmailOTP.objects.get(user=self.user, used=False)
+        self.assertNotEqual(new_otp.id, first_otp.id)
+
+        verify = self.client.post(self.verify_url, {
+            "user_id": str(self.user.id),
+            "code": new_otp.code,
+        })
+        self.assertEqual(verify.status_code, status.HTTP_200_OK)
+
+    def test_resend_also_subject_to_generation_rate_limit(self):
+        # The limit is shared across login and resend — otherwise resend
+        # would be an unthrottled bypass of the login-side limit.
+        self._login()
+        self.client.post(self.resend_url, {"user_id": str(self.user.id)})
+        self.client.post(self.resend_url, {"user_id": str(self.user.id)})
+
+        fourth = self.client.post(self.resend_url, {"user_id": str(self.user.id)})
+        self.assertEqual(fourth.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_resend_with_invalid_user_id_rejected(self):
+        response = self.client.post(self.resend_url, {"user_id": str(uuid.uuid4())})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_verify_otp_missing_fields_rejected(self):
+        response = self.client.post(self.verify_url, {"user_id": str(self.user.id)})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_non_patient_login_unaffected_by_otp(self):
+        # Scope boundary: EMT/hospital/ambulance/mera_admin logins must
+        # keep working exactly as before — immediate tokens, no OTP email.
+        User.objects.create_user(
+            email="emt-otp-check@example.com",
+            password="TestPass123!",
+            role=Role.EMT,
+            full_name="Not An OTP Patient",
+        )
+        response = self.client.post(self.login_url, {
+            "email": "emt-otp-check@example.com",
+            "password": "TestPass123!",
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertNotIn("otp_required", response.data)
+        self.assertEqual(len(mail.outbox), 0)
 
 
 class EMTUpdateDeleteTest(TestCase):

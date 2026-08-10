@@ -352,3 +352,37 @@ class PasswordResetToken(models.Model):
     @property
     def is_valid(self) -> bool:
         return not self.used and timezone.now() < self.expires_at
+
+# Email OTP — second factor on top of patient login (not a replacement
+# for email/password; see LoginView/VerifyOTPView/ResendOTPView in
+# accounts/views.py). Same shape as PasswordResetToken above (a short-
+# lived, single-use, user-scoped record consumed on use) but a 6-digit
+# code meant to be typed in rather than a long token meant to be a link.
+
+class EmailOTP(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="email_otps")
+    code = models.CharField(max_length=6)
+    # Wrong-code guesses against THIS specific code, not a per-user/
+    # permanent counter (see User.failed_login_attempts, which is a
+    # separate thing — password-guess lockout, not OTP-guess lockout;
+    # conflating the two would count a mistyped password against a code
+    # that hasn't even been generated yet). Capped in VerifyOTPView —
+    # once exceeded, this code is burned (used=True) rather than the
+    # account being locked, so recovery is just "request a new code",
+    # not an admin/password-reset intervention.
+    attempts = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = "Email OTP"
+        indexes = [models.Index(fields=["user", "used"])]
+
+    def __str__(self):
+        return f"OTP for {self.user.email} — {'used' if self.used else 'active'}"
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.used and timezone.now() < self.expires_at

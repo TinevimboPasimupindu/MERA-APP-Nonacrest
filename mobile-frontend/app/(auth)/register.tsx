@@ -10,6 +10,7 @@ import {
 
 import { useState } from 'react';
 import { useRouter } from 'expo-router';
+import { FontAwesome } from '@expo/vector-icons';
 
 import {
   useFonts,
@@ -20,6 +21,7 @@ import {
 
 import { Colors, Spacing } from '../../constants/theme';
 import { apiCall, ENDPOINTS, saveToken } from '../../services/api';
+import { useGoogleSignIn } from '../../hooks/use-google-signin';
 
 export default function RegisterScreen() {
   const router = useRouter();
@@ -33,6 +35,12 @@ export default function RegisterScreen() {
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Sends real consent from this screen's own checkbox — unlike
+  // login.tsx's Google button (which has no checkbox and sends none at
+  // all), so a new account created from here has genuinely been agreed to
+  // by the same checkbox the email/password path already requires.
+  const google = useGoogleSignIn({ popi_consent: agreedToTerms, terms_consent: agreedToTerms });
 
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -125,9 +133,9 @@ export default function RegisterScreen() {
       >
 
         {/* Error Message */}
-        {error ? (
+        {(error || google.error) ? (
           <View style={styles.errorContainer}>
-            <Text style={styles.errorText}>{error}</Text>
+            <Text style={styles.errorText}>{error || google.error}</Text>
           </View>
         ) : null}
 
@@ -248,6 +256,36 @@ export default function RegisterScreen() {
             <ActivityIndicator color={Colors.white} />
           ) : (
             <Text style={styles.nextButtonText}>Next →</Text>
+          )}
+        </TouchableOpacity>
+
+        {/* OR Divider */}
+        <View style={styles.dividerRow}>
+          <View style={styles.dividerLine} />
+          <Text style={styles.dividerText}>OR</Text>
+          <View style={styles.dividerLine} />
+        </View>
+
+        {/* Google Button — same consent checkbox gates this as the Next
+            button above, for the same reason: a new account created via
+            Google still needs real, user-driven consent, not a
+            side-effect of tapping a button that happens to also send
+            popi_consent/terms_consent behind the scenes. */}
+        <TouchableOpacity
+          style={[
+            styles.googleButton,
+            (!agreedToTerms || google.loading || !google.canSignIn) && styles.googleButtonDisabled,
+          ]}
+          onPress={google.signIn}
+          disabled={!agreedToTerms || google.loading || !google.canSignIn}
+        >
+          {google.loading ? (
+            <ActivityIndicator color="#4285F4" />
+          ) : (
+            <>
+              <FontAwesome name="google" size={24} color="#4285F4" style={{ marginRight: 16 }} />
+              <Text style={styles.googleButtonText}>Continue with Google</Text>
+            </>
           )}
         </TouchableOpacity>
 
@@ -398,6 +436,40 @@ const styles = StyleSheet.create({
     color: Colors.white,
     fontSize: 22,
     fontFamily: 'Inter_700Bold',
+  },
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 24,
+    marginBottom: 20,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#2A2D45',
+  },
+  dividerText: {
+    color: Colors.textSecondary,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 14,
+    marginHorizontal: 12,
+  },
+  googleButton: {
+    backgroundColor: Colors.white,
+    width: '100%',
+    padding: 18,
+    borderRadius: 22,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+  },
+  googleButtonDisabled: {
+    opacity: 0.6,
+  },
+  googleButtonText: {
+    color: '#000000',
+    fontSize: 16,
+    fontFamily: 'Inter_500Medium',
   },
   signInRow: {
     flexDirection: 'row',

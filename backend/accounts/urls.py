@@ -10,6 +10,7 @@ from .views import (
     DeactivateUserView,
     EMTCreateView,
     EMTUpdateView,
+    GoogleSignInView,
     HospitalAdminCreateView,
     HospitalListView,
     HospitalRegisterView,
@@ -24,13 +25,18 @@ from .views import (
     PasswordResetRequestView,
     PlatformStatsView,
     ReactivateUserView,
+    ResendOTPView,
+    VerifyOTPView,
 )
 
 urlpatterns = [
-    # Registration 
+    # Registration
     path("register/patient/",   PatientRegisterView.as_view(),   name="register-patient"),
     path("register/hospital/",  HospitalRegisterView.as_view(),  name="register-hospital"),
     path("register/ambulance/", AmbulanceRegisterView.as_view(), name="register-ambulance"),
+
+    # Google Sign-In (patients only)
+    path("google/", GoogleSignInView.as_view(), name="google-signin"),
 
     # Registered hospitals list
     path("hospitals/", HospitalListView.as_view(), name="hospital-list"),
@@ -38,9 +44,13 @@ urlpatterns = [
     # Institutional document upload (step 3) 
     path("documents/", InstitutionalDocumentUploadView.as_view(), name="institutional-documents"),
 
-    # Login & tokens 
+    # Login & tokens
     path("login/",         LoginView.as_view(),      name="login"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token-refresh"),
+
+    # Email OTP — second factor after email/password (patients only)
+    path("verify-otp/", VerifyOTPView.as_view(), name="verify-otp"),
+    path("resend-otp/", ResendOTPView.as_view(), name="resend-otp"),
 
     # Password reset 
     path("password-reset/",         PasswordResetRequestView.as_view(), name="password-reset-request"),
