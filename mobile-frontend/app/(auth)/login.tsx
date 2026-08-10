@@ -174,26 +174,33 @@ export default function LoginScreen() {
         <Text style={styles.appleButtonText}>Continue with Apple</Text>
       </TouchableOpacity>
 
-      {/* Google Button */}
-      <TouchableOpacity
-        style={[styles.googleButton, (google.loading || !google.canSignIn) && styles.googleButtonDisabled]}
-        onPress={google.signIn}
-        disabled={google.loading || !google.canSignIn}
-      >
-        {google.loading ? (
-          <ActivityIndicator color="#4285F4" />
-        ) : (
-          <>
-            <FontAwesome
-              name="google"
-              size={30}
-              color="#4285F4"
-              style={{ marginRight: 20 }}
-            />
-            <Text style={styles.googleButtonText}>Continue with Google</Text>
-          </>
-        )}
-      </TouchableOpacity>
+      {/* Google Button — hidden entirely when Google Sign-In isn't
+          configured (missing EXPO_PUBLIC_GOOGLE_*_CLIENT_ID env vars),
+          rather than rendered disabled. Google Sign-In is currently paused
+          (see PROJECT_CONTEXT.md) and those vars can legitimately be
+          absent in any given environment — the rest of this screen must
+          keep working regardless. */}
+      {google.isConfigured && (
+        <TouchableOpacity
+          style={[styles.googleButton, (google.loading || !google.canSignIn) && styles.googleButtonDisabled]}
+          onPress={google.signIn}
+          disabled={google.loading || !google.canSignIn}
+        >
+          {google.loading ? (
+            <ActivityIndicator color="#4285F4" />
+          ) : (
+            <>
+              <FontAwesome
+                name="google"
+                size={30}
+                color="#4285F4"
+                style={{ marginRight: 20 }}
+              />
+              <Text style={styles.googleButtonText}>Continue with Google</Text>
+            </>
+          )}
+        </TouchableOpacity>
+      )}
 
       {/* Secure Badge */}
       <View style={styles.secureBadge}>
