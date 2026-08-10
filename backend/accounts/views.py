@@ -8,11 +8,13 @@
 # Account locked after 5 failed login attempts
 # Email OTP second factor after password (patients only)
 
+import logging
 import secrets
 from datetime import timedelta
 
+import requests
+from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.mail import send_mail
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import permissions, status
@@ -45,12 +47,67 @@ from .serializers import (
     VerifyOTPSerializer,
 )
 
+logger = logging.getLogger(__name__)
+
 # OTP validity window and how often a user may have a new one generated
 # (via login or resend) — see _generate_and_send_otp's own comment and
 # PROJECT_CONTEXT.md for the full rate-limiting reasoning.
 OTP_VALIDITY_MINUTES = 5
 OTP_MAX_PER_WINDOW = 3
 OTP_GENERATION_WINDOW_MINUTES = 10
+
+BREVO_SEND_EMAIL_URL = "https://api.brevo.com/v3/smtp/email"
+# Real quota per call, real user waiting on the other end of this request —
+# short and deliberate, not left to whatever requests'/the OS's default
+# would be. This is the exact gap that caused the earlier production
+# incident: Gmail SMTP had no timeout configured at all, so a blocked
+# connection attempt (Render blocks outbound SMTP ports platform-wide —
+# see settings.py) hung until gunicorn's own --timeout force-killed the
+# stuck worker. A plain HTTP POST with an explicit timeout can only ever
+# fail fast, never hang the request.
+BREVO_TIMEOUT_SECONDS = 10.0
+
+
+class OTPDeliveryError(Exception):
+    """Raised when an OTP code was generated but could not be emailed."""
+
+
+def _send_otp_email(user: User, code: str) -> None:
+    # Brevo's transactional email HTTP API (plain HTTPS, port 443 — not
+    # blocked on Render's free tier the way SMTP ports are). Uses `requests`
+    # directly rather than Brevo's own SDK — `requests` is already an
+    # installed dependency (google-auth's transport pulls it in, see
+    # accounts/serializers.py), so this adds zero new packages, which
+    # mattered given the same day's memory investigation into this app's
+    # per-worker footprint.
+    try:
+        response = requests.post(
+            BREVO_SEND_EMAIL_URL,
+            headers={
+                "api-key": settings.BREVO_API_KEY,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={
+                "sender": {"email": settings.BREVO_SENDER_EMAIL},
+                "to": [{"email": user.email}],
+                "subject": "Your MERA verification code",
+                "textContent": (
+                    f"Your MERA login verification code is {code}.\n\n"
+                    f"This code expires in {OTP_VALIDITY_MINUTES} minutes. "
+                    "If you didn't try to log in, you can ignore this email."
+                ),
+            },
+            timeout=BREVO_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        # Covers a timeout, a connection failure, and a non-2xx response
+        # (raise_for_status()) uniformly — any of these means "the code
+        # was not delivered," which every caller needs to treat the same
+        # way: tell the user clearly, don't pretend success, don't hang.
+        logger.warning("Brevo OTP email send failed for user %s: %r", user.id, exc)
+        raise OTPDeliveryError("Could not send verification code.") from exc
 
 
 def _search_filter(queryset, search: str):
@@ -92,7 +149,7 @@ def _generate_and_send_otp(user: User) -> bool:
     #   - THIS function throttles *generation*: at most OTP_MAX_PER_WINDOW
     #     new codes per user per OTP_GENERATION_WINDOW_MINUTES. Generating
     #     a code sends a real email, so an unthrottled caller could spam a
-    #     target's inbox, or burn through this app's Gmail sending quota,
+    #     target's inbox, or burn through this app's Brevo sending quota,
     #     just by hitting login (or resend) repeatedly with a correct
     #     password. 3 per 10 minutes is deliberately generous for the
     #     legitimate case (typo'd the code, let it expire, resent once or
@@ -108,31 +165,57 @@ def _generate_and_send_otp(user: User) -> bool:
     if recent_count >= OTP_MAX_PER_WINDOW:
         return False
 
+    code = f"{secrets.randbelow(1_000_000):06d}"
+
+    # Send BEFORE touching the DB, deliberately — the old Gmail SMTP
+    # version persisted the new code (and invalidated the old one) first,
+    # then sent. If the send then failed, the user was left with no valid
+    # code at all: the old one dead, the new one never delivered, no way
+    # to recover except a fresh login attempt (which the rate limit above
+    # would eventually start blocking). Sending first means a delivery
+    # failure (see _send_otp_email/OTPDeliveryError) leaves any existing
+    # live code untouched and doesn't create a row for a code nobody ever
+    # received. Raises OTPDeliveryError on failure — callers must catch it.
+    _send_otp_email(user, code)
+
     # Only one *live* code at a time — invalidate any still-unused ones
     # before issuing a new one (same pattern PasswordResetRequestSerializer
     # already uses for reset tokens), so VerifyOTPSerializer never has to
-    # guess which of several unused rows is "the" current code.
+    # guess which of several unused rows is "the" current code. Only
+    # reached once the send above has actually succeeded.
     EmailOTP.objects.filter(user=user, used=False).update(used=True)
-
-    code = f"{secrets.randbelow(1_000_000):06d}"
     EmailOTP.objects.create(
         user=user,
         code=code,
         expires_at=timezone.now() + timedelta(minutes=OTP_VALIDITY_MINUTES),
     )
-
-    send_mail(
-        subject="Your MERA verification code",
-        message=(
-            f"Your MERA login verification code is {code}.\n\n"
-            f"This code expires in {OTP_VALIDITY_MINUTES} minutes. "
-            "If you didn't try to log in, you can ignore this email."
-        ),
-        from_email=None,  # falls back to settings.DEFAULT_FROM_EMAIL
-        recipient_list=[user.email],
-        fail_silently=False,
-    )
     return True
+
+
+def _otp_required_response(user: User) -> Response:
+    # Shared by LoginView (post-password, patients only) and ResendOTPView
+    # — both need to react to _generate_and_send_otp()'s three possible
+    # outcomes the same way, so the response-construction for each isn't
+    # duplicated in two places.
+    try:
+        sent = _generate_and_send_otp(user)
+    except OTPDeliveryError:
+        # Distinct from the 429 below — this isn't the caller's fault, so
+        # don't tell them to "wait a few minutes" as if a rate limit were
+        # the problem when Brevo itself is the one that failed.
+        return Response(
+            {"detail": "Could not send verification code. Please try again shortly."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if not sent:
+        return Response(
+            {"detail": "Too many verification codes requested. Please wait a few minutes and try again."},
+            status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+    return Response(
+        {"otp_required": True, "user_id": str(user.id)},
+        status=status.HTTP_200_OK,
+    )
 
 # Patient Registration
 
@@ -371,16 +454,7 @@ class LoginView(APIView):
         # web-side role keep logging in with just email/password, exactly
         # as before this change — nothing below this branch changed).
         if user.role == Role.PATIENT:
-            sent = _generate_and_send_otp(user)
-            if not sent:
-                return Response(
-                    {"detail": "Too many verification codes requested. Please wait a few minutes and try again."},
-                    status=status.HTTP_429_TOO_MANY_REQUESTS,
-                )
-            return Response(
-                {"otp_required": True, "user_id": str(user.id)},
-                status=status.HTTP_200_OK,
-            )
+            return _otp_required_response(user)
 
         return Response(_token_response(user), status=status.HTTP_200_OK)
 
@@ -413,16 +487,7 @@ class ResendOTPView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        sent = _generate_and_send_otp(user)
-        if not sent:
-            return Response(
-                {"detail": "Too many verification codes requested. Please wait a few minutes and try again."},
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
-            )
-        return Response(
-            {"otp_required": True, "user_id": str(user.id)},
-            status=status.HTTP_200_OK,
-        )
+        return _otp_required_response(user)
 
 # Password Reset
 

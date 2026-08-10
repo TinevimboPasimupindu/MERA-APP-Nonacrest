@@ -3,9 +3,9 @@
 
 import uuid
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from django.core import mail
+import requests
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -101,10 +101,15 @@ class LoginTest(TestCase):
             full_name="Test Patient",
         )
 
-    def test_successful_login_requires_otp_for_patient(self):
+    @patch("accounts.views.requests.post")
+    def test_successful_login_requires_otp_for_patient(self, mock_post):
         # Patients now get an OTP-required response instead of tokens
-        # directly — see GoogleSignInTest... no, see the OTP test classes
-        # below for the full two-step round trip (login -> verify-otp).
+        # directly — see EmailOTPLoginTest below for the full two-step
+        # round trip (login -> verify-otp). Brevo's send is mocked here
+        # purely so this test doesn't depend on a real network call for
+        # something it isn't actually testing (email delivery specifics
+        # belong to EmailOTPLoginTest).
+        mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
         response = self.client.post(self.url, {
             "email": "patient@example.com",
             "password": "TestPass123!",
@@ -295,14 +300,16 @@ class GoogleSignInTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+@override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
 class EmailOTPLoginTest(TestCase):
     # Second factor on top of patient login — patients only (see LoginView).
-    # Django's test runner automatically swaps EMAIL_BACKEND for an
-    # in-memory one during `manage.py test` (captured in
-    # django.core.mail.outbox), so these never hit real Gmail SMTP —
-    # no @override_settings needed for that, unlike GOOGLE_MAPS_API_KEY/
-    # GOOGLE_WEB_CLIENT_ID elsewhere, which aren't part of Django's own
-    # testing-aware subsystems.
+    # The real Brevo API is never hit in tests — accounts.views.requests.post
+    # is mocked directly, same approach emergencies/tests.py already uses
+    # for the Google Routes API (mock the one line that calls the external
+    # service, not the whole HTTP stack). BREVO_API_KEY/BREVO_SENDER_EMAIL
+    # are supplied via @override_settings for the same reason
+    # GOOGLE_MAPS_API_KEY/GOOGLE_WEB_CLIENT_ID are elsewhere — the real dev
+    # .env may not have them set.
 
     def setUp(self):
         self.client = APIClient()
@@ -315,6 +322,13 @@ class EmailOTPLoginTest(TestCase):
             role=Role.PATIENT,
             full_name="OTP Patient",
         )
+
+        # Successful Brevo response by default — individual tests override
+        # self.mock_post.return_value/side_effect to exercise failure paths.
+        patcher = patch("accounts.views.requests.post")
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
 
     def _login(self):
         return self.client.post(self.login_url, {
@@ -329,12 +343,57 @@ class EmailOTPLoginTest(TestCase):
         self.assertEqual(response.data.get("user_id"), str(self.user.id))
         self.assertNotIn("access", response.data)
 
-        self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(mail.outbox[0].to, ["otp-patient@example.com"])
+        self.assertEqual(self.mock_post.call_count, 1)
+        call = self.mock_post.call_args
+        self.assertEqual(call.args[0], "https://api.brevo.com/v3/smtp/email")
+        self.assertEqual(call.kwargs["headers"]["api-key"], "test-brevo-key")
+        self.assertEqual(call.kwargs["json"]["to"], [{"email": "otp-patient@example.com"}])
+        self.assertEqual(call.kwargs["json"]["sender"], {"email": "noreply@test.mera.example"})
+        # The reasonable timeout the task called for — this is exactly the
+        # gap that let the earlier Gmail SMTP call hang indefinitely.
+        self.assertEqual(call.kwargs["timeout"], 10.0)
+
         otp = EmailOTP.objects.get(user=self.user, used=False)
         self.assertEqual(len(otp.code), 6)
         self.assertTrue(otp.code.isdigit())
-        self.assertIn(otp.code, mail.outbox[0].body)
+        self.assertIn(otp.code, call.kwargs["json"]["textContent"])
+
+    def test_otp_delivery_failure_returns_503_and_leaves_existing_code_usable(self):
+        # First, a real successful login/code (this is what a patient would
+        # already have in hand if a later resend then fails).
+        self._login()
+        original_otp = EmailOTP.objects.get(user=self.user, used=False)
+
+        # Now Brevo fails on the next attempt (timeout, connection error,
+        # DNS failure — requests.RequestException covers all of these the
+        # same way).
+        self.mock_post.side_effect = requests.exceptions.Timeout("Brevo took too long")
+        response = self.client.post(self.resend_url, {"user_id": str(self.user.id)})
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertNotIn("otp_required", response.data)
+
+        # Send-before-persist: a failed delivery must not invalidate the
+        # code the patient already has, and must not leave behind a row
+        # for a code that was never actually sent.
+        original_otp.refresh_from_db()
+        self.assertFalse(original_otp.used)
+        self.assertEqual(EmailOTP.objects.filter(user=self.user, used=False).count(), 1)
+
+    def test_otp_delivery_http_error_returns_503(self):
+        # A non-2xx response from Brevo (e.g. bad API key, invalid sender)
+        # surfaces via raise_for_status() — covered separately from the
+        # network-level Timeout case above since it's a different code path
+        # through _send_otp_email's except clause.
+        error_response = Mock(status_code=401)
+        error_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "401 Unauthorized", response=error_response
+        )
+        self.mock_post.return_value = error_response
+
+        response = self._login()
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(EmailOTP.objects.filter(user=self.user).count(), 0)
 
     def test_correct_otp_returns_tokens(self):
         self._login()
@@ -414,7 +473,7 @@ class EmailOTPLoginTest(TestCase):
 
         fourth = self._login()
         self.assertEqual(fourth.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
-        self.assertEqual(len(mail.outbox), 3)
+        self.assertEqual(self.mock_post.call_count, 3)
 
     def test_resend_issues_a_new_code_and_invalidates_the_old_one(self):
         self._login()
@@ -423,7 +482,7 @@ class EmailOTPLoginTest(TestCase):
         response = self.client.post(self.resend_url, {"user_id": str(self.user.id)})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data.get("otp_required"))
-        self.assertEqual(len(mail.outbox), 2)
+        self.assertEqual(self.mock_post.call_count, 2)
 
         first_otp.refresh_from_db()
         self.assertTrue(first_otp.used)  # invalidated by the resend
@@ -471,7 +530,7 @@ class EmailOTPLoginTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
         self.assertNotIn("otp_required", response.data)
-        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(self.mock_post.call_count, 0)
 
 
 class EMTUpdateDeleteTest(TestCase):
@@ -1074,8 +1133,12 @@ class LoginRejectsDeactivatedAccountTest(TestCase):
         })
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_active_patient_can_still_log_in(self):
+    @patch("accounts.views.requests.post")
+    def test_active_patient_can_still_log_in(self, mock_post):
         # Guard against an overly-broad fix accidentally blocking everyone.
+        # Reaches the patient OTP branch, so Brevo's send is mocked — this
+        # test is about is_active, not email delivery.
+        mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
         User.objects.create_user(
             email="active-patient@example.com", password="pass",
             role=Role.PATIENT, full_name="Active Patient",

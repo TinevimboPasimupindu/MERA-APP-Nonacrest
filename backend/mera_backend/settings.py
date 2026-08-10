@@ -51,25 +51,27 @@ GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
 GOOGLE_WEB_CLIENT_ID = os.environ.get("GOOGLE_WEB_CLIENT_ID")
 GOOGLE_IOS_CLIENT_ID = os.environ.get("GOOGLE_IOS_CLIENT_ID")
 
-# Email — Gmail SMTP, used for the patient-login email OTP step (see
-# accounts/views.py::LoginView / VerifyOTPView / ResendOTPView). This is
-# the first real outbound email in this backend — PasswordResetRequestSerializer
-# still only stubs email sending (see that serializer's own comment). Django's
-# test runner automatically swaps EMAIL_BACKEND for an in-memory one during
-# `manage.py test` (captured in django.core.mail.outbox), so tests never hit
-# real Gmail SMTP regardless of what's configured here or whether
-# EMAIL_HOST_USER/PASSWORD are set in a given environment's .env.
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = "smtp.gmail.com"
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER")
-# A Gmail *app password*, not the account's real login password — Gmail
-# requires this for SMTP access when 2FA is enabled on the sending account
-# (and rejects the real password outright if it is). Same "secrets never go
-# in Git" rule as every other credential in this project.
-EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD")
-DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+# Email — Brevo's transactional email HTTP API, used for the patient-login
+# email OTP step (see accounts/views.py::_send_otp_email /
+# LoginView / VerifyOTPView / ResendOTPView).
+#
+# NOT Gmail SMTP, deliberately — that was the original approach and it's
+# what caused a real production incident: Render's free tier blocks all
+# outbound SMTP ports (25, 465, 587) at the platform level, as a documented
+# anti-abuse policy, not a bug in this app's config. Every send_mail() call
+# either hung (no EMAIL_TIMEOUT was set, so the blocked connection attempt
+# never gave up) or failed, and the resulting stuck gunicorn worker got
+# force-killed by gunicorn's own --timeout — logged as "Perhaps out of
+# memory?", which is gunicorn's generic guess for any SIGKILL death, not
+# a real memory reading. See PROJECT_CONTEXT.md for the full writeup.
+# Brevo's API is plain HTTPS (port 443), which Render does not block.
+#
+# If PasswordResetRequestSerializer's still-stubbed email sending
+# (accounts/serializers.py) ever gets wired up for real, it must go
+# through this same Brevo path too — Django's SMTP EmailBackend cannot
+# work on this host at all, for any feature, regardless of credentials.
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
+BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
