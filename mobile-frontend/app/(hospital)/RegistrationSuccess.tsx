@@ -27,17 +27,11 @@ import {
   Animated,
   Linking,
 } from 'react-native';
-import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-
 // ─── Navigation Types ─────────────────────────────────────────────────────────
-type RootStackParamList = {
-  RegistrationSuccess: undefined;
-  Home:                undefined;
-  HospitalPortal:      undefined;
-  AmbulancePortal:     undefined;
-};
-
-type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'RegistrationSuccess'>;
+interface NavigationProp {
+  navigate: (screen: string) => void;
+  reset: (state: { index: number; routes: { name: string }[] }) => void;
+}
 
 interface Props {
   navigation?: NavigationProp;
