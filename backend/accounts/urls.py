@@ -26,6 +26,7 @@ from .views import (
     PlatformStatsView,
     ReactivateUserView,
     ResendOTPView,
+    TriggerPasswordResetView,
     VerifyOTPView,
 )
 
@@ -83,4 +84,9 @@ urlpatterns = [
     path("admin/users/<uuid:user_id>/",             AdminUserEditView.as_view(),  name="admin-user-edit"),
     path("admin/users/<uuid:user_id>/deactivate/", DeactivateUserView.as_view(), name="admin-user-deactivate"),
     path("admin/users/<uuid:user_id>/reactivate/", ReactivateUserView.as_view(), name="admin-user-reactivate"),
+    path(
+        "admin/users/<uuid:user_id>/trigger-password-reset/",
+        TriggerPasswordResetView.as_view(),
+        name="admin-trigger-password-reset",
+    ),
 ]

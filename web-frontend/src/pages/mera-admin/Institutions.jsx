@@ -39,6 +39,30 @@ const ROLE_GROUPS = {
   ambulance: new Set(['ambulance_service', 'ambulance_admin']),
 };
 
+// Required onboarding documents (see HospitalAdminCreationSerializer/
+// AmbulanceAdminCreationSerializer) — GET /auth/admin/institutions/ returns
+// all four *_url fields on every row regardless of role (a single User row
+// holds every role's optional fields, blank for whichever doesn't apply —
+// same convention as everywhere else in this codebase), so this just picks
+// the pair relevant to the row's own role. A blank URL means either the
+// account predates this feature or (shouldn't happen going forward, since
+// the backend requires both at creation) an upload didn't complete.
+function documentLinksFor(inst) {
+  if (ROLE_GROUPS.hospital.has(inst.role)) {
+    return [
+      { label: 'Facility Certificate', url: inst.health_facility_certificate_url },
+      { label: 'CIPC Registration', url: inst.cipc_registration_url },
+    ];
+  }
+  if (ROLE_GROUPS.ambulance.has(inst.role)) {
+    return [
+      { label: 'Operating License', url: inst.ems_operating_license_url },
+      { label: 'HPCSA/DoH Registration', url: inst.hpcsa_doh_registration_url },
+    ];
+  }
+  return [];
+}
+
 function formatWhen(iso) {
   if (!iso) return '—';
   return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
@@ -65,8 +89,22 @@ function buildFields(nameField, nameLabel) {
 const HOSPITAL_FIELDS = buildFields('facility_name', 'Facility name');
 const AMBULANCE_FIELDS = buildFields('service_name', 'Service name');
 
-function CreateInstitutionModal({ title, fields, endpoint, roleGroup, onClose, onCreated }) {
+// Required onboarding documents, per the original project spec (see
+// PROJECT_CONTEXT.md's "Required institution-onboarding documents" section)
+// — backend field names must match HospitalAdminCreationSerializer/
+// AmbulanceAdminCreationSerializer's FileField names exactly.
+const HOSPITAL_DOCUMENT_FIELDS = [
+  { name: 'health_facility_certificate', label: 'Health Facility Certificate' },
+  { name: 'cipc_registration_document', label: 'CIPC Registration Document' },
+];
+const AMBULANCE_DOCUMENT_FIELDS = [
+  { name: 'ems_operating_license', label: 'EMS Operating License' },
+  { name: 'hpcsa_doh_registration_document', label: 'HPCSA/DoH Registration Document' },
+];
+
+function CreateInstitutionModal({ title, fields, documentFields, endpoint, roleGroup, onClose, onCreated }) {
   const [form, setForm] = useState(Object.fromEntries(fields.map((f) => [f.name, ''])));
+  const [documents, setDocuments] = useState({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -120,15 +158,28 @@ function CreateInstitutionModal({ title, fields, endpoint, roleGroup, onClose, o
       setError('Select which deactivated institution this account is taking over.');
       return;
     }
+    const missingDoc = documentFields.find((d) => !documents[d.name]);
+    if (missingDoc) {
+      setError(`${missingDoc.label} is required.`);
+      return;
+    }
 
     setBusy(true);
     try {
-      const payload = reassign ? { ...form, successor_of: successorOf } : form;
+      // Files can't travel in a JSON body — apiCall() special-cases a
+      // FormData instance (skips JSON.stringify and lets the browser set
+      // its own multipart Content-Type/boundary; see services/api.js).
+      const payload = new FormData();
+      Object.entries(form).forEach(([key, value]) => payload.append(key, value));
+      if (reassign) payload.append('successor_of', successorOf);
+      documentFields.forEach((d) => payload.append(d.name, documents[d.name]));
+
       await apiCall(endpoint, 'POST', payload);
       onCreated();
     } catch (err) {
+      const fieldError = [...fields, ...documentFields].map((f) => err[f.name]?.[0]).find(Boolean);
       setError(
-        err.detail || err.email?.[0] || err.successor_of?.[0] ||
+        err.detail || err.successor_of?.[0] || fieldError ||
         'Could not create that account. Check the fields and try again.'
       );
     } finally {
@@ -156,6 +207,24 @@ function CreateInstitutionModal({ title, fields, endpoint, roleGroup, onClose, o
             />
           </div>
         ))}
+
+        <div style={{ marginBottom: 14, paddingTop: 10, borderTop: `1px solid ${COLORS.border}` }}>
+          <p style={{ fontSize: 11.5, color: COLORS.inkFaint, margin: '0 0 12px', lineHeight: 1.5 }}>
+            Required supporting documents — reviewed by MERA during onboarding.
+          </p>
+          {documentFields.map((d) => (
+            <div key={d.name} style={{ marginBottom: 14 }}>
+              <label style={labelStyle}>{d.label}</label>
+              <input
+                type="file"
+                required
+                accept="application/pdf,image/*"
+                onChange={(e) => setDocuments((s) => ({ ...s, [d.name]: e.target.files[0] || null }))}
+                style={inputStyle}
+              />
+            </div>
+          ))}
+        </div>
 
         <div style={{ marginBottom: 14, paddingTop: 10, borderTop: `1px solid ${COLORS.border}` }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
@@ -291,7 +360,7 @@ export default function Institutions() {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr>
-                {['Name', 'Type', 'Email', 'Status', 'Joined', 'Actions'].map((h, i) => (
+                {['Name', 'Type', 'Email', 'Status', 'Documents', 'Joined', 'Actions'].map((h, i) => (
                   <th key={i} style={thStyle}>{h}</th>
                 ))}
               </tr>
@@ -311,6 +380,25 @@ export default function Institutions() {
                       on every row. Revisit adding it back once that bypass is reinstated
                       and institutional_status can actually vary again. */}
                   <td style={tdStyle}><StatusBadge status={inst.is_active === false ? 'inactive' : 'active'} /></td>
+                  <td style={{ ...tdStyle, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {documentLinksFor(inst).map((doc) => (
+                      doc.url ? (
+                        <a
+                          key={doc.label}
+                          href={doc.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={docLinkStyle}
+                        >
+                          View {doc.label}
+                        </a>
+                      ) : (
+                        <span key={doc.label} style={{ fontSize: 11.5, color: COLORS.inkFaint }}>
+                          {doc.label} — not on file
+                        </span>
+                      )
+                    ))}
+                  </td>
                   <td style={{ ...tdStyle, fontSize: 12.5, color: COLORS.inkMuted }}>{formatWhen(inst.date_joined)}</td>
                   <td style={tdStyle}>
                     <UserRowActions user={inst} onChanged={(patch) => patchInstitution(inst.id, patch)} />
@@ -326,6 +414,7 @@ export default function Institutions() {
         <CreateInstitutionModal
           title="Create Hospital Admin account"
           fields={HOSPITAL_FIELDS}
+          documentFields={HOSPITAL_DOCUMENT_FIELDS}
           endpoint={ENDPOINTS.createHospitalAdmin}
           roleGroup="hospital"
           onClose={() => setShowCreate(null)}
@@ -336,6 +425,7 @@ export default function Institutions() {
         <CreateInstitutionModal
           title="Create Ambulance Admin account"
           fields={AMBULANCE_FIELDS}
+          documentFields={AMBULANCE_DOCUMENT_FIELDS}
           endpoint={ENDPOINTS.createAmbulanceAdmin}
           roleGroup="ambulance"
           onClose={() => setShowCreate(null)}
@@ -354,9 +444,16 @@ export default function Institutions() {
 const mutedText = { color: COLORS.inkMuted, fontSize: 13, margin: 0 };
 const thStyle = { textAlign: 'left', padding: '13px 20px', fontSize: 11, fontWeight: 600, color: COLORS.inkMuted, textTransform: 'uppercase', letterSpacing: '0.04em', background: 'rgba(255,255,255,0.03)', borderBottom: `1px solid ${COLORS.border}` };
 const tdStyle = { padding: '14px 20px', color: COLORS.ink, textAlign: 'left' };
+const docLinkStyle = { color: COLORS.accent, fontSize: 11.5, fontWeight: 600, textDecoration: 'none' };
 const createBtnStyle = { padding: '10px 18px', borderRadius: 8, border: 'none', background: COLORS.accent, color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer' };
 const overlayStyle = { position: 'fixed', inset: 0, background: 'rgba(2,28,57,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, backdropFilter: 'blur(2px)' };
-const panelStyle = { background: COLORS.panel, borderRadius: 14, padding: 28, width: 420, boxShadow: SHADOW.modal };
+// maxHeight + overflowY so this modal (now longer, with the document
+// upload fields added) scrolls its own content internally once it's
+// taller than the viewport, instead of overflowing the fixed-position
+// overlay with the top cut off and no way to reach it. Same fix, same
+// values, applied consistently to every modal in this codebase — see
+// App.css's .modal-panel and UserRowActions.jsx's panelStyle.
+const panelStyle = { background: COLORS.panel, borderRadius: 14, padding: 28, width: 420, maxWidth: '90vw', maxHeight: '90vh', overflowY: 'auto', boxSizing: 'border-box', boxShadow: SHADOW.modal };
 const closeBtnStyle = { background: 'none', border: 'none', color: COLORS.inkMuted, fontSize: 13, cursor: 'pointer', fontWeight: 600 };
 const labelStyle = { display: 'block', fontSize: 12, fontWeight: 600, color: COLORS.inkMuted, marginBottom: 6 };
 const inputStyle = { width: '100%', padding: '10px 12px', borderRadius: 7, border: `1px solid ${COLORS.border}`, background: '#0F0F1A', color: COLORS.ink, fontSize: 13, boxSizing: 'border-box' };

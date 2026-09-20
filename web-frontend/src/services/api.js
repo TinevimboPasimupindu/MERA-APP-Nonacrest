@@ -5,6 +5,8 @@ export const ENDPOINTS = {
   login: '/auth/login/',
   me: '/auth/me/',
   refresh: '/auth/token/refresh/',
+  passwordResetRequest: '/auth/password-reset/',
+  passwordResetConfirm: '/auth/password-reset/confirm/',
 
   // Hospital admin — verification queue
   verificationQueue: '/verification/queue/',
@@ -36,6 +38,7 @@ export const ENDPOINTS = {
   editUser: (id) => `/auth/admin/users/${id}/`,
   deactivateUser: (id) => `/auth/admin/users/${id}/deactivate/`,
   reactivateUser: (id) => `/auth/admin/users/${id}/reactivate/`,
+  triggerPasswordReset: (id) => `/auth/admin/users/${id}/trigger-password-reset/`,
   createHospitalAdmin: '/auth/admin/create/hospital-admin/',
   createAmbulanceAdmin: '/auth/admin/create/ambulance-admin/',
 };
@@ -86,9 +89,18 @@ async function refreshAccessToken() {
 }
 
 export const apiCall = async (endpoint, method = 'GET', body = null, requiresAuth = true, _retry = true) => {
-  const headers = {
-    'Content-Type': 'application/json',
-  };
+  // FormData (file uploads — see Institutions.jsx's document upload fields)
+  // must NOT be JSON.stringify'd, and must NOT get an explicit Content-Type
+  // header: the browser sets `multipart/form-data; boundary=...` itself when
+  // it sees the fetch body is a FormData instance, and that boundary value
+  // is only known to the browser — setting Content-Type manually here would
+  // produce a header with no boundary, which the server can't parse. Every
+  // other caller passes a plain object and is unaffected by this branch.
+  const isFormData = body instanceof FormData;
+  const headers = {};
+  if (!isFormData) {
+    headers['Content-Type'] = 'application/json';
+  }
 
   if (requiresAuth) {
     const token = getToken();
@@ -98,7 +110,7 @@ export const apiCall = async (endpoint, method = 'GET', body = null, requiresAut
   const response = await fetch(`${BASE_URL}${endpoint}`, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    body: body ? (isFormData ? body : JSON.stringify(body)) : undefined,
   });
 
   if (response.status === 401 && requiresAuth && _retry && getRefreshToken()) {

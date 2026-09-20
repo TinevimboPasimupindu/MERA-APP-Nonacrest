@@ -37,11 +37,13 @@ class UserAdmin(BaseUserAdmin):
             "facility_name", "facility_type", "facility_registration_number",
             "admin_contact_name", "admin_phone", "official_address", "province",
             "has_emergency_unit", "visiting_hours", "latitude", "longitude",
+            "health_facility_certificate_url", "cipc_registration_url",
         )}),
         ("Ambulance Fields", {"fields": (
             "service_name", "service_type", "dispatch_phone", "dispatch_address",
             "operational_areas", "capabilities", "number_of_active_ambulances",
             "preferred_hospitals", "is_available",
+            "ems_operating_license_url", "hpcsa_doh_registration_url",
         )}),
         ("Dates", {"fields": ("date_joined",)}),
     )

@@ -6,7 +6,7 @@
 # Role enforced permanently at registration
 # Institutional accounts start pending
 # Account locked after 5 failed login attempts
-# Email OTP second factor after password (patients only)
+# Email OTP second factor after password (mobile-only roles: patient, EMT)
 
 import logging
 import secrets
@@ -20,13 +20,23 @@ from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.permissions import IsAmbulanceService, IsMERAAdmin
 from emergencies.models import Incident
-from .models import AMBULANCE_ROLES, EmailOTP, HOSPITAL_ROLES, InstitutionalStatus, Role, User
+from .models import (
+    AMBULANCE_ROLES,
+    EmailOTP,
+    HOSPITAL_ROLES,
+    InstitutionalStatus,
+    OTP_REQUIRED_ROLES,
+    PasswordResetToken,
+    Role,
+    User,
+)
 from .serializers import (
     AdminUserEditSerializer,
     AdminUserListSerializer,
@@ -45,6 +55,7 @@ from .serializers import (
     PasswordResetRequestSerializer,
     UserSummarySerializer,
     VerifyOTPSerializer,
+    issue_password_reset_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +66,14 @@ logger = logging.getLogger(__name__)
 OTP_VALIDITY_MINUTES = 5
 OTP_MAX_PER_WINDOW = 3
 OTP_GENERATION_WINDOW_MINUTES = 10
+
+# Self-service password-reset generation limit — same "count recent rows,
+# cap at N per window" shape as the OTP constants above, just a longer
+# window: see _password_reset_generation_allowed's own comment for why a
+# forgotten-password event warrants an hour-long window instead of OTP's
+# 10 minutes.
+PASSWORD_RESET_MAX_PER_WINDOW = 3
+PASSWORD_RESET_WINDOW_MINUTES = 60
 
 BREVO_SEND_EMAIL_URL = "https://api.brevo.com/v3/smtp/email"
 # Real quota per call, real user waiting on the other end of this request —
@@ -108,6 +127,61 @@ def _send_otp_email(user: User, code: str) -> None:
         # way: tell the user clearly, don't pretend success, don't hang.
         logger.warning("Brevo OTP email send failed for user %s: %r", user.id, exc)
         raise OTPDeliveryError("Could not send verification code.") from exc
+
+
+class PasswordResetEmailError(Exception):
+    """Raised when a password reset token was generated but could not be emailed."""
+
+
+def _send_password_reset_email(user: User, token_value: str) -> None:
+    # Same Brevo HTTP API pattern as _send_otp_email above — see that
+    # function's comment for why this must be Brevo, never Gmail SMTP, on
+    # this host. Shared by both password-reset entry points:
+    # TriggerPasswordResetView (MERA-admin/ambulance-admin-triggered) below,
+    # and PasswordResetRequestView (self-service, any role) further down.
+    #
+    # A real web-frontend URL, not the old "mera://reset-password?token=..."
+    # deep link — that scheme was never actually registered by the mobile
+    # app (its real scheme is "frontend", set in mobile-frontend/app.json),
+    # so the link didn't even open the app it was nominally built for, on
+    # top of no screen existing anywhere to receive it either way. Every
+    # role that can end up on the receiving end of this email (patient
+    # aside — patients aren't covered by either reset flow's callers, see
+    # those views) logs into the *web* app, so a single shared web
+    # confirmation page (web-frontend/src/pages/auth/ResetPassword.jsx,
+    # route "/reset-password") is the actual fix, not a corrected deep
+    # link. WEB_FRONTEND_URL (settings.py) is configurable per environment,
+    # same reason BREVO_SENDER_EMAIL/GOOGLE_MAPS_API_KEY/etc. all are.
+    reset_link = f"{settings.WEB_FRONTEND_URL}/reset-password?token={token_value}"
+    try:
+        response = requests.post(
+            BREVO_SEND_EMAIL_URL,
+            headers={
+                "api-key": settings.BREVO_API_KEY,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={
+                "sender": {"email": settings.BREVO_SENDER_EMAIL},
+                "to": [{"email": user.email}],
+                "subject": "Reset your MERA password",
+                "textContent": (
+                    # Deliberately neutral about *who* triggered this —
+                    # this same function now serves both the self-service
+                    # request (the recipient acted) and the admin-triggered
+                    # one (someone else did), so wording that assumes
+                    # either would be wrong for the other case.
+                    "A password reset was requested for your MERA account.\n\n"
+                    f"Reset link: {reset_link}\n\n"
+                    "This link expires in 1 hour. If you didn't request this, you can safely ignore this email."
+                ),
+            },
+            timeout=BREVO_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("Brevo password-reset email send failed for user %s: %r", user.id, exc)
+        raise PasswordResetEmailError("Could not send password reset email.") from exc
 
 
 def _search_filter(queryset, search: str):
@@ -193,8 +267,9 @@ def _generate_and_send_otp(user: User) -> bool:
 
 
 def _otp_required_response(user: User) -> Response:
-    # Shared by LoginView (post-password, patients only) and ResendOTPView
-    # — both need to react to _generate_and_send_otp()'s three possible
+    # Shared by LoginView (post-password, patient/EMT only — see
+    # OTP_REQUIRED_ROLES) and ResendOTPView — both need to react to
+    # _generate_and_send_otp()'s three possible
     # outcomes the same way, so the response-construction for each isn't
     # duplicated in two places.
     try:
@@ -216,6 +291,39 @@ def _otp_required_response(user: User) -> Response:
         {"otp_required": True, "user_id": str(user.id)},
         status=status.HTTP_200_OK,
     )
+
+
+def _password_reset_generation_allowed(user: User) -> bool:
+    # Same "count recent rows, cap at N per window" shape
+    # _generate_and_send_otp uses for EmailOTP above — reused deliberately
+    # rather than inventing a different mechanism, per PROJECT_CONTEXT.md's
+    # own note flagging this as a gap to close this way.
+    #
+    # Window is 60 minutes, not OTP's 10 — a forgotten password is a much
+    # lower-frequency event than a login code needed on every session, and
+    # the token this gates is valid for a full hour (see
+    # issue_password_reset_token), an order of magnitude longer than a
+    # 5-minute OTP code. Matching the window to the token's own lifetime is
+    # deliberate: "at most 3 fresh reset links per hour per account" is
+    # generous for every legitimate retry scenario (typo'd the email,
+    # checking spam, wanting a fresh link because the last one is about to
+    # expire) while bounding an attacker to a handful of emails per hour
+    # against one target — regardless of how many IPs or requests they
+    # spread the attempts across, which is exactly the gap the general
+    # per-IP anon throttle can't close on its own (see "API rate limiting"
+    # in PROJECT_CONTEXT.md). No separate guess-attempt concern exists here
+    # the way OTP has one (EmailOTP.attempts/OTP_MAX_VERIFY_ATTEMPTS) —
+    # this token is a long, unguessable secrets.token_urlsafe(48), not a
+    # 6-digit code meant to be typed, so generation volume is the only
+    # thing worth bounding.
+    #
+    # Counts PasswordResetToken rows, which — same as EmailOTP rows above —
+    # are only ever created after a send has actually succeeded (see
+    # PasswordResetRequestView.post()), so a Brevo failure never itself
+    # counts against this budget.
+    window_start = timezone.now() - timedelta(minutes=PASSWORD_RESET_WINDOW_MINUTES)
+    recent_count = PasswordResetToken.objects.filter(user=user, created_at__gte=window_start).count()
+    return recent_count < PASSWORD_RESET_MAX_PER_WINDOW
 
 # Patient Registration
 
@@ -356,8 +464,16 @@ class InstitutionalDocumentUploadView(APIView):
     # Hospitals and Ambulance Services upload supporting documents
     # after initial registration but before admin approval.
     # Authentication uses the JWT issued at registration.
+    #
+    # Shares the "institutional_documents" throttle scope with
+    # HospitalAdminCreateView/AmbulanceAdminCreateView below (see
+    # settings.py's DEFAULT_THROTTLE_RATES comment) — this endpoint also
+    # triggers real Cloudinary storage now that DEFAULT_FILE_STORAGE points
+    # there (see CLOUDINARY_STORAGE in settings.py).
 
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "institutional_documents"
 
     def post(self, request):
         if request.user.role not in (HOSPITAL_ROLES | AMBULANCE_ROLES):
@@ -449,16 +565,21 @@ class LoginView(APIView):
 
         user.reset_login_attempts()
 
-        # Email OTP second factor — patients only, per project scope
-        # (mobile self-registration/login is patient-only; EMTs and every
-        # web-side role keep logging in with just email/password, exactly
-        # as before this change — nothing below this branch changed).
-        if user.role == Role.PATIENT:
+        # Email OTP second factor — mobile-only roles (OTP_REQUIRED_ROLES =
+        # {patient, EMT}, accounts/models.py). Originally patient-only;
+        # extended to cover EMT too since both are mobile-only accounts a
+        # stolen device/session could otherwise fully compromise with just
+        # a password (see OTP_REQUIRED_ROLES's own comment for the full
+        # reasoning). Every web-side role (hospital_admin, ambulance_admin,
+        # mera_admin, and the legacy hospital/ambulance_service names)
+        # keeps logging in with just email/password, unchanged.
+        if user.role in OTP_REQUIRED_ROLES:
             return _otp_required_response(user)
 
         return Response(_token_response(user), status=status.HTTP_200_OK)
 
-# Email OTP — second factor after email/password (patients only)
+# Email OTP — second factor after email/password (patient and EMT, the
+# mobile-only roles — see OTP_REQUIRED_ROLES, accounts/models.py)
 
 class VerifyOTPView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -475,7 +596,7 @@ class ResendOTPView(APIView):
 
     def post(self, request):
         try:
-            user = User.objects.get(id=request.data.get("user_id"), role=Role.PATIENT)
+            user = User.objects.get(id=request.data.get("user_id"), role__in=OTP_REQUIRED_ROLES)
         except (User.DoesNotExist, ValueError, TypeError, ValidationError):
             # user_id is an opaque UUID the client already holds from the
             # login response, not something worth anti-enumeration effort
@@ -492,15 +613,58 @@ class ResendOTPView(APIView):
 # Password Reset
 
 class PasswordResetRequestView(APIView):
+    # POST /auth/password-reset/ — self-service, any role, unauthenticated.
+    # PasswordResetRequestSerializer only validates the email's *format*
+    # (and deliberately never rejects one that doesn't match an account —
+    # see its own validate_email comment); the actual lookup/send/token-
+    # issue orchestration lives here, the same shape TriggerPasswordResetView
+    # above already uses, rather than hidden inside a serializer's .save()
+    # where this view couldn't control what happens around a delivery
+    # failure (see below).
+    #
+    # Anti-enumeration is the whole point of this endpoint's shape, and it
+    # has to hold across FOUR distinct outcomes, not two: no account with
+    # that email, an account that got a real email sent, an account where
+    # the send itself failed (Brevo down), and — new — an account that's
+    # already hit its generation rate limit (_password_reset_generation_
+    # allowed). All four return the exact same 200 with the exact same
+    # generic message — unlike TriggerPasswordResetView, which is admin-
+    # facing and correctly *does* surface a 503 on delivery failure (the
+    # admin needs to know their action didn't work), a distinguishable
+    # response here would leak exactly the thing this endpoint exists to
+    # hide: returning anything other than the generic message only when the
+    # account is real — whether that's a 503, a 429, or any other tell —
+    # would confirm the account exists just as surely as a "no account
+    # found" message would. So both a delivery failure AND a rate-limit hit
+    # are swallowed silently from the caller's perspective; the failure
+    # case is still logged server-side inside _send_password_reset_email
+    # for operational visibility, the rate-limit case needs no such
+    # logging (it's an expected, not exceptional, outcome — the account
+    # owner's own repeated requests, or an attacker's, look identical from
+    # here and both are handled the same way: silently capped).
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         serializer = PasswordResetRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        # Always return 200 regardless of whether email exists (anti-enumeration)
+        email = serializer.validated_data["email"]
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            user = None
+
+        if user is not None and _password_reset_generation_allowed(user):
+            token_value = secrets.token_urlsafe(48)
+            try:
+                _send_password_reset_email(user, token_value)
+            except PasswordResetEmailError:
+                pass  # deliberately silent — see class-level comment above
+            else:
+                issue_password_reset_token(user, token_value=token_value)
+
         return Response(
-            {"detail": "If an account with that email exists, a reset link has been sent."},
+            {"detail": "A password reset link has been sent."},
             status=status.HTTP_200_OK,
         )
 
@@ -604,9 +768,16 @@ class HospitalListView(APIView):
 # These accounts are created top-down by MERA staff during institutional
 # onboarding — no self-registration, no approval queue (MERA already vetted
 # them), so they're created active and APPROVED immediately.
+#
+# Both views below share the "institutional_documents" throttle scope with
+# InstitutionalDocumentUploadView above — each call here uploads two real
+# documents to Cloudinary (see HospitalAdminCreationSerializer/
+# AmbulanceAdminCreationSerializer's required document fields).
 
 class HospitalAdminCreateView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "institutional_documents"
 
     def post(self, request):
         serializer = HospitalAdminCreationSerializer(data=request.data)
@@ -623,6 +794,8 @@ class HospitalAdminCreateView(APIView):
 
 class AmbulanceAdminCreateView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "institutional_documents"
 
     def post(self, request):
         serializer = AmbulanceAdminCreationSerializer(data=request.data)
@@ -851,3 +1024,91 @@ class DeactivateUserView(APIView):
             detail += f" {deactivated_emt_count} linked EMT account(s) were also deactivated."
 
         return Response({"detail": detail, "deactivated_emt_count": deactivated_emt_count})
+
+
+class TriggerPasswordResetView(APIView):
+    # POST /auth/admin/users/{id}/trigger-password-reset/
+    #
+    # Two allowed callers, two different scopes — not the same
+    # IsMERAAdmin-only gate every other /admin/users/{id}/... action uses,
+    # because unlike those, this one now has a legitimate second caller:
+    #   - MERA admin: unrestricted, any account, any role — same as before.
+    #     Now that hospital_admin/ambulance_admin/mera_admin all have a real
+    #     self-service alternative (PasswordResetRequestView below), this is
+    #     mainly "MERA wants to force a rotation" or an account genuinely
+    #     locked out with no working recovery email on file.
+    #   - ambulance_admin (or legacy ambulance_service): may trigger a reset
+    #     for one of their own EMTs, and only their own. EMTs can also
+    #     self-serve via mobile-frontend's forgot-password.tsx (same
+    #     PasswordResetRequestView the web login uses) — originally
+    #     login.tsx's "Forgot password?" link was a dead element with no
+    #     onPress, so this admin path was the only realistic recovery route;
+    #     it's still useful when an EMT can't get to their own inbox or
+    #     simply isn't the one asking. Ownership is scoped exactly the way
+    #     EMTUpdateView already scopes edit/deactivate — via the
+    #     ambulance_service FK, a mismatched/nonexistent target is a 404,
+    #     not a 403, so ownership isn't leaked.
+    # hospital_admin is deliberately NOT a caller here at all — hospital
+    # admins have no subordinate accounts (no hospital-side equivalent of
+    # an EMT), so they only ever reset their own password, which is exactly
+    # what the self-service flow below is for.
+    #
+    # Reuses the existing PasswordResetToken mechanism end-to-end rather
+    # than building a parallel one: issue_password_reset_token()
+    # (accounts/serializers.py) is the exact same "invalidate any live
+    # token, issue a fresh one" function PasswordResetRequestSerializer's
+    # self-service flow already uses, and the token this produces is
+    # consumed by the completely unmodified PasswordResetConfirmView/
+    # PasswordResetConfirmSerializer — there is no second confirm endpoint
+    # to build or keep in sync.
+    #
+    # Send-before-persist, same reasoning as _generate_and_send_otp: the
+    # token value is generated and emailed FIRST, and only written to the
+    # database (via issue_password_reset_token, passed that exact value) if
+    # the send actually succeeds. This avoids repeating the exact mistake
+    # documented in PROJECT_CONTEXT.md's OTP/Gmail-SMTP incident — a failed
+    # send must never invalidate whatever reset token a user might already
+    # have in hand.
+    #
+    # throttle_scope="password_reset_trigger" (settings.py's
+    # DEFAULT_THROTTLE_RATES, 5/hour) replaces the general default
+    # throttles for this view — this sends a real Brevo email per call, the
+    # same "an unthrottled caller could spam a target's inbox or burn
+    # through sending quota" concern _generate_and_send_otp's own comment
+    # already reasons about for OTP, just unprotected here until now.
+    permission_classes = [permissions.IsAuthenticated, (IsMERAAdmin | IsAmbulanceService)]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_reset_trigger"
+
+    def post(self, request, user_id):
+        from rest_framework.exceptions import NotFound
+
+        if request.user.role in AMBULANCE_ROLES:
+            # Ownership-scoped — same lookup shape as
+            # EMTUpdateView._get_own_emt: role AND ambulance_service both
+            # have to match, so a target belonging to a different service
+            # (or not an EMT at all) 404s exactly like "doesn't exist"
+            # rather than confirming it exists under a 403.
+            try:
+                user = User.objects.get(id=user_id, role=Role.EMT, ambulance_service=request.user)
+            except User.DoesNotExist:
+                raise NotFound("User not found.")
+        else:
+            # Only MERA admin can reach this branch — the permission_classes
+            # gate above already rejects every other role.
+            try:
+                user = User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                raise NotFound("User not found.")
+
+        token_value = secrets.token_urlsafe(48)
+        try:
+            _send_password_reset_email(user, token_value)
+        except PasswordResetEmailError:
+            return Response(
+                {"detail": "Could not send password reset email. Please try again shortly."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        issue_password_reset_token(user, token_value=token_value)
+        return Response({"detail": f"Password reset email sent to {user.email}."})

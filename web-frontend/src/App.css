@@ -177,6 +177,14 @@ body {
   text-align: center;
 }
 
+.success-text {
+  color: #8bf2a8;
+  font-size: 0.85rem;
+  margin-top: 0.8rem;
+  text-align: center;
+  line-height: 1.5;
+}
+
 .login-footer {
   position: relative;
   z-index: 1;
@@ -623,6 +631,13 @@ body {
   max-width: 90vw;
   padding: 28px;
   text-align: left;
+  /* Scroll the panel's own content when it's taller than the viewport,
+     instead of overflowing a fixed-position backdrop with no way to reach
+     the cut-off part. box-sizing: border-box so max-height caps the
+     rendered box (including this padding), not just the content area. */
+  max-height: 90vh;
+  overflow-y: auto;
+  box-sizing: border-box;
 }
 
 .modal-panel h2 {
