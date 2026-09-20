@@ -8,6 +8,7 @@
 import secrets
 from datetime import timedelta
 
+from cloudinary.uploader import upload as cloudinary_upload
 from django.conf import settings
 from django.utils import timezone
 from google.auth.transport import requests as google_requests
@@ -20,6 +21,7 @@ from .models import (
     HOSPITAL_ROLES,
     InstitutionalDocument,
     InstitutionalStatus,
+    OTP_REQUIRED_ROLES,
     PasswordResetToken,
     Role,
     User,
@@ -40,6 +42,20 @@ def _validate_passwords(data: dict) -> dict:
 def _check_email_unique(email: str) -> None:
     if User.objects.filter(email=email).exists():
         raise serializers.ValidationError({"email": "An account with this email already exists."})
+
+
+def _upload_institutional_document(file, folder: str) -> str:
+    # Shared by HospitalAdminCreationSerializer/AmbulanceAdminCreationSerializer
+    # for their required onboarding-document uploads (see those classes).
+    # resource_type="auto" lets Cloudinary route PDFs/images/scans correctly
+    # without this app needing to know or care which one it got — these are
+    # arbitrary supporting documents (certificates, licenses), not a fixed
+    # format. Returns just the secure_url string, which is all
+    # accounts/models.py's *_url fields store — the file itself lives only
+    # in Cloudinary, never touching this app's own (ephemeral, on Render)
+    # filesystem.
+    result = cloudinary_upload(file, resource_type="auto", folder=folder)
+    return result["secure_url"]
 
 
 def _validate_successor(user_id, role_set, type_label):
@@ -334,10 +350,26 @@ class HospitalAdminCreationSerializer(serializers.ModelSerializer):
     # it (Incidents, VerificationRequests) are never touched. Hospitals have
     # no subordinate accounts, so unlike the ambulance version of this field,
     # there's nothing else to re-link.
+    #
+    # health_facility_certificate / cipc_registration_document: REQUIRED
+    # (per the original project spec — see PROJECT_CONTEXT.md) supporting
+    # documents, uploaded in the same request as account creation. Plain
+    # required FileFields — DRF rejects the request with a clear per-field
+    # "This field is required." error if either is missing, so there is no
+    # separate/duplicated presence check needed here. Uploaded to Cloudinary
+    # in .create() (see _upload_institutional_document above) and the
+    # resulting URLs are stored on the new User row, never on disk locally.
+    # Required even when successor_of is used — HOSPITAL_IDENTITY_FIELDS
+    # deliberately does NOT include these document URLs, so a successor
+    # admin must supply fresh copies rather than inheriting the old
+    # account's (the old account's documents were reviewed for a different,
+    # now-deactivated admin; MERA still needs current ones for this one).
 
     password = serializers.CharField(write_only=True, min_length=8)
     confirm_password = serializers.CharField(write_only=True)
     successor_of = serializers.UUIDField(required=False, allow_null=True, write_only=True)
+    health_facility_certificate = serializers.FileField(write_only=True)
+    cipc_registration_document = serializers.FileField(write_only=True)
 
     class Meta:
         model = User
@@ -358,6 +390,8 @@ class HospitalAdminCreationSerializer(serializers.ModelSerializer):
             "password",
             "confirm_password",
             "successor_of",
+            "health_facility_certificate",
+            "cipc_registration_document",
         ]
 
     def validate_email(self, value):
@@ -374,10 +408,19 @@ class HospitalAdminCreationSerializer(serializers.ModelSerializer):
         validated_data.pop("confirm_password")
         validated_data.pop("successor_of", None)
         old_account = validated_data.pop("_old_account", None)
+        certificate = validated_data.pop("health_facility_certificate")
+        cipc_document = validated_data.pop("cipc_registration_document")
 
         if old_account:
             for field in HOSPITAL_IDENTITY_FIELDS:
                 validated_data[field] = getattr(old_account, field)
+
+        validated_data["health_facility_certificate_url"] = _upload_institutional_document(
+            certificate, folder="institutional_documents/hospital"
+        )
+        validated_data["cipc_registration_url"] = _upload_institutional_document(
+            cipc_document, folder="institutional_documents/hospital"
+        )
 
         return User.objects.create_user(
             role=Role.HOSPITAL_ADMIN,
@@ -419,10 +462,18 @@ class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
     # second step." See ReactivateUserView for the standalone version of
     # this same reasoning. Historical Incidents/VerificationRequests still
     # pointing at the old account are never touched.
+    #
+    # ems_operating_license / hpcsa_doh_registration_document: REQUIRED (per
+    # the original project spec) — same reasoning and mechanism as
+    # HospitalAdminCreationSerializer's document fields above, ambulance
+    # side. Required even under successor_of, for the same reason: identity
+    # fields are inherited, but current supporting documents are not.
 
     password = serializers.CharField(write_only=True, min_length=8)
     confirm_password = serializers.CharField(write_only=True)
     successor_of = serializers.UUIDField(required=False, allow_null=True, write_only=True)
+    ems_operating_license = serializers.FileField(write_only=True)
+    hpcsa_doh_registration_document = serializers.FileField(write_only=True)
 
     class Meta:
         model = User
@@ -441,6 +492,8 @@ class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
             "password",
             "confirm_password",
             "successor_of",
+            "ems_operating_license",
+            "hpcsa_doh_registration_document",
         ]
 
     def validate_email(self, value):
@@ -457,10 +510,19 @@ class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
         validated_data.pop("confirm_password")
         validated_data.pop("successor_of", None)
         old_account = validated_data.pop("_old_account", None)
+        license_file = validated_data.pop("ems_operating_license")
+        registration_document = validated_data.pop("hpcsa_doh_registration_document")
 
         if old_account:
             for field in AMBULANCE_IDENTITY_FIELDS:
                 validated_data[field] = getattr(old_account, field)
+
+        validated_data["ems_operating_license_url"] = _upload_institutional_document(
+            license_file, folder="institutional_documents/ambulance"
+        )
+        validated_data["hpcsa_doh_registration_url"] = _upload_institutional_document(
+            registration_document, folder="institutional_documents/ambulance"
+        )
 
         new_user = User.objects.create_user(
             role=Role.AMBULANCE_ADMIN,
@@ -587,7 +649,16 @@ class InstitutionSummarySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "display_name", "role", "email", "is_active", "institutional_status", "date_joined"]
+        fields = [
+            "id", "display_name", "role", "email", "is_active", "institutional_status", "date_joined",
+            # Required onboarding documents (see HospitalAdminCreationSerializer/
+            # AmbulanceAdminCreationSerializer) — for MERA admin document
+            # review. Whichever pair doesn't apply to this row's role is just
+            # blank, same convention as every other role-specific field on
+            # User (see AdminUserEditSerializer's own comment on this).
+            "health_facility_certificate_url", "cipc_registration_url",
+            "ems_operating_license_url", "hpcsa_doh_registration_url",
+        ]
         read_only_fields = fields
 
     def get_display_name(self, obj):
@@ -643,8 +714,40 @@ class AdminUserListSerializer(serializers.ModelSerializer):
 
 # Password reset
 
+def issue_password_reset_token(user: User, token_value=None) -> PasswordResetToken:
+    # The single place "invalidate any existing live token, issue a fresh
+    # one" happens — shared by accounts/views.py's two password-reset entry
+    # points: PasswordResetRequestView (self-service, any role) and
+    # TriggerPasswordResetView (MERA-admin/ambulance-admin-triggered). Both
+    # must produce a token PasswordResetConfirmSerializer/
+    # PasswordResetConfirmView accepts identically — that endpoint is
+    # completely unmodified and doesn't know or care which flow generated
+    # the token it's handed.
+    #
+    # token_value is normally left to be generated here, EXCEPT both real
+    # callers now pass one in that they already sent via Brevo before
+    # calling this — learning from the real OTP production incident
+    # documented in PROJECT_CONTEXT.md (Gmail SMTP hanging mid-request),
+    # both flows send first and only persist once the send has actually
+    # succeeded, so a delivery failure never invalidates a token the
+    # recipient never received.
+    PasswordResetToken.objects.filter(user=user, used=False).update(used=True)
+    token_value = token_value or secrets.token_urlsafe(48)
+    return PasswordResetToken.objects.create(
+        user=user,
+        token=token_value,
+        expires_at=timezone.now() + timedelta(hours=1),
+    )
+
+
 class PasswordResetRequestSerializer(serializers.Serializer):
     # Step 1: User submits their email to request a reset link.
+    #
+    # Validation only — the actual lookup/send/token-issue orchestration
+    # lives in accounts/views.py::PasswordResetRequestView, not here (see
+    # that view's own comment for why: it needs to control exactly what
+    # happens around a delivery failure, for anti-enumeration reasons a
+    # serializer's .save() can't easily express).
 
     email = serializers.EmailField()
 
@@ -652,34 +755,6 @@ class PasswordResetRequestSerializer(serializers.Serializer):
         # We intentionally do not raise an error if the email doesn't exist —
         # this prevents user enumeration attacks.
         return value
-
-    def save(self):
-        email = self.validated_data["email"]
-        try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
-            return  # Silent — see validate_email note above
-
-        # Invalidate any existing unused tokens for this user
-        PasswordResetToken.objects.filter(user=user, used=False).update(used=True)
-
-        token_value = secrets.token_urlsafe(48)
-        PasswordResetToken.objects.create(
-            user=user,
-            token=token_value,
-            expires_at=timezone.now() + timedelta(hours=1),
-        )
-
-        # In production, send this via email. If/when this gets wired up,
-        # it must go through Brevo's HTTP API the same way accounts/views.py
-        # ::_send_otp_email does — NOT django.core.mail.send_mail/Django's
-        # SMTP EmailBackend. Render's free tier blocks all outbound SMTP
-        # ports platform-wide (25/465/587), so an SMTP-based send cannot
-        # work on this host regardless of credentials — this bit the OTP
-        # feature for real (see PROJECT_CONTEXT.md) before Brevo replaced
-        # it there. The frontend deep-links to: mera://reset-password?token=<token_value>
-        # For now, the token is available via the admin or a separate email task.
-        # TODO: wire up Brevo email sending here.
 
 
 class PasswordResetConfirmSerializer(serializers.Serializer):
@@ -719,12 +794,14 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         reset_token.used = True
         reset_token.save(update_fields=["used"])
 
-# Email OTP verification — second factor after email/password (patients
-# only, see LoginView). Deliberately a serializer rather than logic
-# inlined in the view (unlike GoogleSignInView, which is closer to plain
-# credential-checking) — this is a "verify a stored code, act on it" case,
-# the same shape as PasswordResetConfirmSerializer just above, and that's
-# the closer precedent to follow here.
+# Email OTP verification — second factor after email/password, for
+# whichever roles require it (OTP_REQUIRED_ROLES — patient and EMT, the
+# mobile-only roles; see that constant's own comment in accounts/models.py
+# and LoginView). Deliberately a serializer rather than logic inlined in
+# the view (unlike GoogleSignInView, which is closer to plain credential-
+# checking) — this is a "verify a stored code, act on it" case, the same
+# shape as PasswordResetConfirmSerializer just above, and that's the
+# closer precedent to follow here.
 
 class VerifyOTPSerializer(serializers.Serializer):
     user_id = serializers.UUIDField()
@@ -738,7 +815,7 @@ class VerifyOTPSerializer(serializers.Serializer):
         generic_error = {"detail": "Invalid or expired code."}
 
         try:
-            user = User.objects.get(id=data["user_id"], role=Role.PATIENT)
+            user = User.objects.get(id=data["user_id"], role__in=OTP_REQUIRED_ROLES)
         except User.DoesNotExist:
             raise serializers.ValidationError(generic_error)
 

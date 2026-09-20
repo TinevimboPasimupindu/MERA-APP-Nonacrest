@@ -42,8 +42,11 @@ class SOSTriggerTest(TestCase):
     # mera_backend/__init__.py — so auto-confirm-via-background-task isn't built).
     def test_verified_patient_can_trigger_sos(self):
         patient = make_verified_patient()
-        incident = services.trigger_sos(patient, {"latitude": -26.2, "longitude": 28.0, "priority_level": "high"})
+        incident, created = services.trigger_sos(
+            patient, {"latitude": -26.2, "longitude": 28.0, "priority_level": "high"}
+        )
         self.assertEqual(incident.status, IncidentStatus.PENDING_CONFIRMATION)
+        self.assertTrue(created)
 
     def test_unverified_patient_cannot_trigger_sos(self):
         user = User.objects.create_user(
@@ -51,6 +54,83 @@ class SOSTriggerTest(TestCase):
         )
         with self.assertRaises(PermissionError):
             services.trigger_sos(user, {})
+
+    def test_triggering_sos_again_returns_existing_incident_not_a_duplicate(self):
+        # The double-tap case: a second call while the first incident is
+        # still non-terminal must return the *same* incident, not create a
+        # second one — see services.trigger_sos's own comment for why this
+        # is a correctness fix, not just an abuse-prevention one.
+        patient = make_verified_patient()
+        first, first_created = services.trigger_sos(
+            patient, {"latitude": -26.2, "longitude": 28.0}
+        )
+        second, second_created = services.trigger_sos(
+            patient, {"latitude": -26.3, "longitude": 28.1}
+        )
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(Incident.objects.filter(patient=patient).count(), 1)
+
+    def test_new_sos_allowed_after_previous_incident_is_completed(self):
+        patient = make_verified_patient()
+        old_incident, _ = services.trigger_sos(patient, {"latitude": -26.2, "longitude": 28.0})
+        old_incident.status = IncidentStatus.COMPLETED
+        old_incident.save(update_fields=["status"])
+
+        new_incident, created = services.trigger_sos(patient, {"latitude": -26.4, "longitude": 28.2})
+        self.assertTrue(created)
+        self.assertNotEqual(new_incident.id, old_incident.id)
+        self.assertEqual(Incident.objects.filter(patient=patient).count(), 2)
+
+    def test_new_sos_allowed_after_previous_incident_is_cancelled(self):
+        patient = make_verified_patient()
+        old_incident, _ = services.trigger_sos(patient, {"latitude": -26.2, "longitude": 28.0})
+        old_incident.status = IncidentStatus.CANCELLED
+        old_incident.save(update_fields=["status"])
+
+        new_incident, created = services.trigger_sos(patient, {"latitude": -26.4, "longitude": 28.2})
+        self.assertTrue(created)
+        self.assertNotEqual(new_incident.id, old_incident.id)
+
+    def test_duplicate_check_does_not_leak_across_patients(self):
+        patient_a = make_verified_patient(email="dup-a@test.com")
+        patient_b = make_verified_patient(email="dup-b@test.com")
+        incident_a, _ = services.trigger_sos(patient_a, {"latitude": -26.2, "longitude": 28.0})
+
+        incident_b, created_b = services.trigger_sos(patient_b, {"latitude": -26.2, "longitude": 28.0})
+        self.assertTrue(created_b)
+        self.assertNotEqual(incident_a.id, incident_b.id)
+
+
+class SOSTriggerHTTPTest(TestCase):
+    # POST /incidents/trigger_sos/ via the real endpoint — the view-level
+    # status-code contract (201 new / 200 already-active) on top of
+    # SOSTriggerTest's service-level coverage above.
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_first_trigger_returns_201(self):
+        patient = make_verified_patient()
+        self.client.force_authenticate(user=patient)
+        response = self.client.post("/api/incidents/trigger_sos/", {
+            "latitude": -26.2, "longitude": 28.0, "priority_level": "high",
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_second_trigger_while_active_returns_200_with_same_incident(self):
+        patient = make_verified_patient()
+        self.client.force_authenticate(user=patient)
+        first = self.client.post("/api/incidents/trigger_sos/", {
+            "latitude": -26.2, "longitude": 28.0, "priority_level": "high",
+        })
+        second = self.client.post("/api/incidents/trigger_sos/", {
+            "latitude": -26.2, "longitude": 28.0, "priority_level": "high",
+        })
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["id"], first.data["id"])
+        self.assertEqual(Incident.objects.filter(patient=patient).count(), 1)
 
 
 class SOSConfirmTest(TestCase):

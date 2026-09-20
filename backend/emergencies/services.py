@@ -46,7 +46,42 @@ def _notify(msg: str, *args) -> None:
 
 # SOS Trigger
 
-def trigger_sos(patient_user, validated_data: dict) -> Incident:
+# Non-terminal = everything except COMPLETED/CANCELLED — same definition
+# IncidentViewSet.my_active() already uses (exclude() rather than an
+# include-list, so a future new intermediate status is automatically
+# covered here too without this needing a matching update).
+_NON_TERMINAL_EXCLUDE = [IncidentStatus.COMPLETED, IncidentStatus.CANCELLED]
+
+
+def trigger_sos(patient_user, validated_data: dict) -> tuple[Incident, bool]:
+    # Returns (incident, created) — the same shape as Django's own
+    # get_or_create(), which is exactly what this is doing conceptually:
+    # get the patient's existing non-terminal incident if there is one,
+    # otherwise create a new one.
+    #
+    # Duplicate-prevention, not just an abuse/rate concern: an accidental
+    # double-tap on the SOS button is a real, expected scenario for a
+    # patient under stress (shaky hands, a slow UI response tempting a
+    # second tap, a flaky connection retrying client-side) — a rate limit
+    # alone wouldn't stop this, since a double-tap a second apart is well
+    # within any generous per-minute ceiling. Creating two Incidents for
+    # the same emergency would be a real correctness bug regardless of
+    # intent: two ambulances could get dispatched to the same patient, and
+    # emergency contacts would be notified twice for one event. Checked
+    # BEFORE the verification gate below on purpose — a patient who
+    # already has a live incident should get it back regardless of
+    # whether their profile is *currently* verified (verification status
+    # could theoretically change between the first trigger and a retry;
+    # that shouldn't orphan them from their own already-triggered incident).
+    existing = (
+        Incident.objects.filter(patient=patient_user)
+        .exclude(status__in=_NON_TERMINAL_EXCLUDE)
+        .order_by("-triggered_at")
+        .first()
+    )
+    if existing:
+        return existing, False
+
     if not _patient_is_verified(patient_user):
         raise PermissionError("SOS is locked until your medical profile is verified.")
 
@@ -64,7 +99,7 @@ def trigger_sos(patient_user, validated_data: dict) -> Incident:
         _log(incident, "sos_triggered", actor=patient_user)
 
     logger.info("SOS triggered — Incident %s for patient %s", incident.id, patient_user.id)
-    return incident
+    return incident, True
 
 
 def confirm_sos(incident: Incident, method: str = ActivationMethod.MANUAL) -> Incident:

@@ -35,6 +35,19 @@ class Role(models.TextChoices):
 HOSPITAL_ROLES = {Role.HOSPITAL, Role.HOSPITAL_ADMIN}
 AMBULANCE_ROLES = {Role.AMBULANCE_SERVICE, Role.AMBULANCE_ADMIN}
 
+# Roles that go through the mobile app's email-OTP second factor after
+# email/password (see accounts/views.py::LoginView/ResendOTPView and
+# accounts/serializers.py::VerifyOTPSerializer). Every other role
+# (hospital_admin, ambulance_admin, mera_admin, and the legacy hospital/
+# ambulance_service names) is web-only and keeps logging in with just
+# email/password, unchanged. Patient and EMT are grouped here — not
+# because they're otherwise treated alike (they aren't: EMTs don't self-
+# register, patients do) — but because both are mobile-only accounts a
+# stolen device/session could otherwise fully compromise with just a
+# password; the web-only admin roles already have no equivalent mobile
+# attack surface for this specific factor to protect.
+OTP_REQUIRED_ROLES = {Role.PATIENT, Role.EMT}
+
 # Institutional approval state
 
 class InstitutionalStatus(models.TextChoices):
@@ -146,6 +159,17 @@ class User(AbstractBaseUser, PermissionsMixin):
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
 
+    # Required onboarding documents (hospital) — uploaded once, at creation
+    # time, by HospitalAdminCreationSerializer (see accounts/serializers.py).
+    # Stored as plain URLFields holding the Cloudinary secure_url returned by
+    # the upload, rather than Django FileFields — the file bytes themselves
+    # never touch this app's own storage/filesystem (Render's disk is
+    # ephemeral; see CLOUDINARY_STORAGE in settings.py), only the resulting
+    # URL is kept. Reviewable by MERA admin via GET /auth/admin/institutions/
+    # (InstitutionSummarySerializer). Blank/unused for every non-hospital role.
+    health_facility_certificate_url = models.URLField(blank=True, default="")
+    cipc_registration_url = models.URLField(blank=True, default="")
+
     # Ambulance-specific fields
     service_name = models.CharField(max_length=255, blank=True, default="")
     service_type = models.CharField(
@@ -189,6 +213,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     )
     # Availability toggle for dispatcher
     is_available = models.BooleanField(default=True)
+
+    # Required onboarding documents (ambulance) — same reasoning as the
+    # hospital document fields above (see that comment), just the ambulance-
+    # side pair. Populated by AmbulanceAdminCreationSerializer.
+    ems_operating_license_url = models.URLField(blank=True, default="")
+    hpcsa_doh_registration_url = models.URLField(blank=True, default="")
 
     # EMT-specific fields
     ambulance_service = models.ForeignKey(

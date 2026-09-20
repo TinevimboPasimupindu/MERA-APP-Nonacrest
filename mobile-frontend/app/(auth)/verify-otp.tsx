@@ -9,11 +9,14 @@ import { apiCall, ENDPOINTS, saveToken } from '../../services/api';
 import { routeAfterAuth } from '../../utils/route-after-auth';
 
 // Shown after login.tsx's password step succeeds but the backend responds
-// with otp_required instead of tokens (patients only — see
-// accounts/views.py::LoginView). Reached via router.replace so the back
-// button can't return to the password screen and re-trigger login with
-// stale state; the user_id param is the same opaque id LoginView's
-// {otp_required, user_id} response carried.
+// with otp_required instead of tokens (patient and EMT accounts — see
+// accounts/views.py::LoginView's OTP_REQUIRED_ROLES). Reached via
+// router.replace so the back button can't return to the password screen
+// and re-trigger login with stale state; the user_id param is the same
+// opaque id LoginView's {otp_required, user_id} response carried. Nothing
+// on this screen is patient-specific — verify/resend both just pass
+// user_id/code through, and routeAfterAuth (below) already branches on
+// the real role from the token response, same as it always did.
 export default function VerifyOtpScreen() {
   const { userId, email } = useLocalSearchParams<{ userId: string; email?: string }>();
   const [code, setCode] = useState('');
@@ -50,7 +53,7 @@ export default function VerifyOtpScreen() {
       });
       await saveToken(data.access, data.refresh);
       // Same routing decision normal login always made — an OTP step in
-      // between doesn't change where a patient lands afterward.
+      // between doesn't change where a patient or EMT lands afterward.
       await routeAfterAuth(data.user.role);
     } catch (err: any) {
       setError(err.detail || 'Invalid or expired code. Please try again.');

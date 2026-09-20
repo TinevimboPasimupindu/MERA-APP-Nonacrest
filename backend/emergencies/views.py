@@ -82,13 +82,16 @@ class IncidentViewSet(viewsets.GenericViewSet):
         serializer.is_valid(raise_exception=True)
 
         try:
-            incident = services.trigger_sos(request.user, serializer.validated_data)
+            incident, created = services.trigger_sos(request.user, serializer.validated_data)
         except PermissionError as exc:
             raise PermissionDenied(str(exc))
 
+        # 201 for a genuinely new incident, 200 when an already-active one
+        # was returned instead (see services.trigger_sos's duplicate-
+        # prevention comment) — no new resource was created in that case.
         return Response(
             IncidentPatientSerializer(incident).data,
-            status=status.HTTP_201_CREATED,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
     # PATIENT: Confirm SOS

@@ -6,14 +6,47 @@ from datetime import timedelta
 from unittest.mock import Mock, patch
 
 import requests
+from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
 from emergencies.models import Incident, IncidentStatus
-from .models import EmailOTP, InstitutionalStatus, Role, User
+from .models import EmailOTP, InstitutionalStatus, PasswordResetToken, Role, User
+
+
+def _hospital_docs():
+    # The two required onboarding documents HospitalAdminCreationSerializer
+    # now rejects account creation without — see
+    # RequiredInstitutionDocumentsTest for the tests that actually exercise
+    # that requirement. Every other test that creates a hospital_admin
+    # through the API (e.g. InstitutionReassignmentTest) needs these merged
+    # into its payload too, purely so it keeps testing what it was already
+    # testing rather than tripping over an unrelated "missing file" error.
+    return {
+        "health_facility_certificate": SimpleUploadedFile(
+            "certificate.pdf", b"fake-pdf-bytes", content_type="application/pdf"
+        ),
+        "cipc_registration_document": SimpleUploadedFile(
+            "cipc.pdf", b"fake-pdf-bytes", content_type="application/pdf"
+        ),
+    }
+
+
+def _ambulance_docs():
+    # Ambulance-side equivalent of _hospital_docs() above.
+    return {
+        "ems_operating_license": SimpleUploadedFile(
+            "license.pdf", b"fake-pdf-bytes", content_type="application/pdf"
+        ),
+        "hpcsa_doh_registration_document": SimpleUploadedFile(
+            "hpcsa.pdf", b"fake-pdf-bytes", content_type="application/pdf"
+        ),
+    }
 
 
 class PatientRegistrationTest(TestCase):
@@ -302,7 +335,13 @@ class GoogleSignInTest(TestCase):
 
 @override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
 class EmailOTPLoginTest(TestCase):
-    # Second factor on top of patient login — patients only (see LoginView).
+    # Second factor on top of login — originally patient-only, extended to
+    # EMT too (see EMTEmailOTPLoginTest below and accounts/models.py::
+    # OTP_REQUIRED_ROLES). This class exercises the mechanism itself
+    # (generation, rate limiting, guess-attempt capping, delivery failure)
+    # against a patient fixture; EMTEmailOTPLoginTest doesn't repeat all of
+    # that (the mechanism doesn't branch on role), just the three code
+    # paths that actually changed for EMT.
     # The real Brevo API is never hit in tests — accounts.views.requests.post
     # is mocked directly, same approach emergencies/tests.py already uses
     # for the Google Routes API (mock the one line that calls the external
@@ -514,23 +553,147 @@ class EmailOTPLoginTest(TestCase):
         response = self.client.post(self.verify_url, {"user_id": str(self.user.id)})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_non_patient_login_unaffected_by_otp(self):
-        # Scope boundary: EMT/hospital/ambulance/mera_admin logins must
-        # keep working exactly as before — immediate tokens, no OTP email.
+    def test_hospital_admin_login_unaffected_by_otp(self):
+        # Scope boundary: OTP_REQUIRED_ROLES is {patient, EMT} — every
+        # web-side role must keep logging in exactly as before, immediate
+        # tokens, no OTP email. EMT moved to its own
+        # EMTEmailOTPLoginTest below, since it's now IN scope, not out of
+        # it — see accounts/models.py::OTP_REQUIRED_ROLES.
         User.objects.create_user(
-            email="emt-otp-check@example.com",
+            email="hospital-admin-otp-check@example.com",
             password="TestPass123!",
-            role=Role.EMT,
-            full_name="Not An OTP Patient",
+            role=Role.HOSPITAL_ADMIN,
+            facility_name="Not An OTP Hospital",
         )
         response = self.client.post(self.login_url, {
-            "email": "emt-otp-check@example.com",
+            "email": "hospital-admin-otp-check@example.com",
             "password": "TestPass123!",
         })
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
         self.assertNotIn("otp_required", response.data)
         self.assertEqual(self.mock_post.call_count, 0)
+
+    def test_ambulance_admin_login_unaffected_by_otp(self):
+        User.objects.create_user(
+            email="ambulance-admin-otp-check@example.com",
+            password="TestPass123!",
+            role=Role.AMBULANCE_ADMIN,
+            service_name="Not An OTP EMS",
+        )
+        response = self.client.post(self.login_url, {
+            "email": "ambulance-admin-otp-check@example.com",
+            "password": "TestPass123!",
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertNotIn("otp_required", response.data)
+        self.assertEqual(self.mock_post.call_count, 0)
+
+    def test_mera_admin_login_unaffected_by_otp(self):
+        User.objects.create_user(
+            email="mera-admin-otp-check@example.com",
+            password="TestPass123!",
+            role=Role.MERA_ADMIN,
+        )
+        response = self.client.post(self.login_url, {
+            "email": "mera-admin-otp-check@example.com",
+            "password": "TestPass123!",
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertNotIn("otp_required", response.data)
+        self.assertEqual(self.mock_post.call_count, 0)
+
+
+@override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
+class EMTEmailOTPLoginTest(TestCase):
+    # Extends the patient-only email OTP second factor (EmailOTPLoginTest
+    # above) to EMT accounts too — see accounts/models.py::
+    # OTP_REQUIRED_ROLES. Deliberately NOT a full duplicate of
+    # EmailOTPLoginTest's 14 tests: the underlying generation/rate-limit/
+    # guess-attempt mechanism (_generate_and_send_otp, VerifyOTPSerializer)
+    # doesn't branch on role at all once the initial role__in lookup
+    # resolves a user — that mechanism is already fully proven by the
+    # patient test suite above and is untouched by this task. What
+    # actually changed here is three specific role filters (LoginView,
+    # ResendOTPView, VerifyOTPSerializer), so this class covers exactly
+    # those three code paths for an EMT account, not the shared mechanism
+    # a second time.
+
+    def setUp(self):
+        self.ambulance = User.objects.create_user(
+            email="otp-emt-owner@example.com", password="pass", role=Role.AMBULANCE_ADMIN,
+            service_name="OTP Test EMS",
+        )
+        self.client = APIClient()
+        self.login_url = reverse("login")
+        self.verify_url = reverse("verify-otp")
+        self.resend_url = reverse("resend-otp")
+        self.user = User.objects.create_user(
+            email="otp-emt@example.com",
+            password="TestPass123!",
+            role=Role.EMT,
+            full_name="OTP EMT",
+            ambulance_service=self.ambulance,
+        )
+
+        patcher = patch("accounts.views.requests.post")
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
+
+    def _login(self):
+        return self.client.post(self.login_url, {
+            "email": "otp-emt@example.com",
+            "password": "TestPass123!",
+        })
+
+    def test_login_sends_otp_instead_of_tokens_for_emt(self):
+        response = self._login()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data.get("otp_required"))
+        self.assertEqual(response.data.get("user_id"), str(self.user.id))
+        self.assertNotIn("access", response.data)
+
+        self.assertEqual(self.mock_post.call_count, 1)
+        call = self.mock_post.call_args
+        self.assertEqual(call.kwargs["json"]["to"], [{"email": "otp-emt@example.com"}])
+
+        otp = EmailOTP.objects.get(user=self.user, used=False)
+        self.assertEqual(len(otp.code), 6)
+        self.assertTrue(otp.code.isdigit())
+        self.assertIn(otp.code, call.kwargs["json"]["textContent"])
+
+    def test_correct_otp_returns_tokens_for_emt(self):
+        self._login()
+        otp = EmailOTP.objects.get(user=self.user, used=False)
+
+        response = self.client.post(self.verify_url, {
+            "user_id": str(self.user.id),
+            "code": otp.code,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+        self.assertEqual(response.data["user"]["role"], "emt")
+        otp.refresh_from_db()
+        self.assertTrue(otp.used)
+
+    def test_resend_works_for_emt(self):
+        # This is the one that would have silently 404'd before the fix —
+        # ResendOTPView's lookup was hardcoded to role=Role.PATIENT.
+        self._login()
+        first_otp = EmailOTP.objects.get(user=self.user, used=False)
+
+        response = self.client.post(self.resend_url, {"user_id": str(self.user.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data.get("otp_required"))
+
+        first_otp.refresh_from_db()
+        self.assertTrue(first_otp.used)
+        new_otp = EmailOTP.objects.get(user=self.user, used=False)
+        self.assertNotEqual(new_otp.id, first_otp.id)
 
 
 class EMTUpdateDeleteTest(TestCase):
@@ -861,6 +1024,15 @@ class InstitutionReassignmentTest(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=self.mera_admin)
 
+        # Not what this test class is about — see
+        # RequiredInstitutionDocumentsTest for that — but every hospital/
+        # ambulance-admin creation call below now requires document uploads,
+        # so the real Cloudinary API must never be hit here either.
+        patcher = patch("accounts.serializers.cloudinary_upload")
+        self.mock_cloudinary_upload = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_cloudinary_upload.return_value = {"secure_url": "https://res.cloudinary.com/test/doc.pdf"}
+
     def test_ambulance_reassignment_copies_identity_and_relinks_emts(self):
         url = reverse("admin-create-ambulance-admin")
         response = self.client.post(url, {
@@ -870,6 +1042,7 @@ class InstitutionReassignmentTest(TestCase):
             "admin_contact_name": "New Admin",
             "admin_phone": "0821111111",
             "successor_of": str(self.old_ambulance.id),
+            **_ambulance_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
@@ -909,17 +1082,26 @@ class InstitutionReassignmentTest(TestCase):
             "password": "TestPass123!",
             "confirm_password": "TestPass123!",
             "successor_of": str(self.old_ambulance.id),
+            **_ambulance_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         already_active_emt.refresh_from_db()
         self.assertTrue(already_active_emt.is_active)
 
-    def test_reactivated_emt_can_actually_log_in_after_reassignment(self):
+    @patch("accounts.views.requests.post")
+    def test_reactivated_emt_can_actually_log_in_after_reassignment(self, mock_post):
         # The real check the reassignment flow is supposed to deliver on:
         # not just an is_active flag flip, but genuine restored access.
         # Confirm login is actually rejected beforehand too, so this proves
         # reassignment *changed* something rather than login having always
         # worked regardless of is_active.
+        #
+        # EMT logins now reach the email-OTP branch (OTP_REQUIRED_ROLES —
+        # see accounts/models.py), so Brevo's send is mocked here — this
+        # test is about reassignment restoring access, not email delivery,
+        # and "restored access" now means reaching the OTP step rather
+        # than getting a 403, not skipping straight to tokens.
+        mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
         login_url = reverse("login")
 
         before = self.client.post(login_url, {
@@ -933,6 +1115,7 @@ class InstitutionReassignmentTest(TestCase):
             "password": "TestPass123!",
             "confirm_password": "TestPass123!",
             "successor_of": str(self.old_ambulance.id),
+            **_ambulance_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
@@ -940,8 +1123,8 @@ class InstitutionReassignmentTest(TestCase):
             "email": "legacy-emt@example.com", "password": "pass",
         })
         self.assertEqual(after.status_code, status.HTTP_200_OK)
-        self.assertIn("access", after.data)
-        self.assertIn("refresh", after.data)
+        self.assertTrue(after.data.get("otp_required"))
+        self.assertEqual(after.data.get("user_id"), str(self.emt.id))
 
     def test_hospital_reassignment_copies_identity_fields(self):
         url = reverse("admin-create-hospital-admin")
@@ -951,6 +1134,7 @@ class InstitutionReassignmentTest(TestCase):
             "confirm_password": "TestPass123!",
             "admin_contact_name": "New Hospital Admin",
             "successor_of": str(self.old_hospital.id),
+            **_hospital_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
@@ -970,6 +1154,7 @@ class InstitutionReassignmentTest(TestCase):
             "confirm_password": "TestPass123!",
             "service_name": "Should Be Ignored",
             "successor_of": str(self.old_ambulance.id),
+            **_ambulance_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         new_ambulance = User.objects.get(email="new-amb2@example.com")
@@ -988,6 +1173,7 @@ class InstitutionReassignmentTest(TestCase):
             "password": "TestPass123!",
             "confirm_password": "TestPass123!",
             "successor_of": str(self.old_ambulance.id),
+            **_ambulance_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
@@ -1005,6 +1191,7 @@ class InstitutionReassignmentTest(TestCase):
             "password": "TestPass123!",
             "confirm_password": "TestPass123!",
             "successor_of": str(active_ambulance.id),
+            **_ambulance_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("successor_of", response.data)
@@ -1017,6 +1204,7 @@ class InstitutionReassignmentTest(TestCase):
             "password": "TestPass123!",
             "confirm_password": "TestPass123!",
             "successor_of": str(self.old_hospital.id),
+            **_ambulance_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("successor_of", response.data)
@@ -1028,6 +1216,7 @@ class InstitutionReassignmentTest(TestCase):
             "password": "TestPass123!",
             "confirm_password": "TestPass123!",
             "successor_of": str(self.old_ambulance.id),
+            **_hospital_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("successor_of", response.data)
@@ -1039,6 +1228,7 @@ class InstitutionReassignmentTest(TestCase):
             "password": "TestPass123!",
             "confirm_password": "TestPass123!",
             "successor_of": str(uuid.uuid4()),
+            **_ambulance_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("successor_of", response.data)
@@ -1050,6 +1240,7 @@ class InstitutionReassignmentTest(TestCase):
             "password": "TestPass123!",
             "confirm_password": "TestPass123!",
             "service_name": "Brand New EMS",
+            **_ambulance_docs(),
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         new_ambulance = User.objects.get(email="brand-new-amb@example.com")
@@ -1237,29 +1428,656 @@ class ReactivateUserTest(TestCase):
         response = self.client.patch(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_non_mera_admin_forbidden(self):
-        self.client.force_authenticate(user=self.hospital)
-        url = reverse("admin-user-reactivate", args=[self.ambulance.id])
-        response = self.client.patch(url)
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_reactivated_emt_can_actually_log_in(self):
-        # Real check, not just the flag: login must actually fail before
-        # reactivation and actually succeed after, via the real endpoint.
-        login_url = reverse("login")
+class RequiredInstitutionDocumentsTest(TestCase):
+    # Required onboarding documents on HospitalAdminCreationSerializer/
+    # AmbulanceAdminCreationSerializer — per the original project spec:
+    # hospitals need a Health Facility Certificate + CIPC Registration
+    # Document; ambulance services need an EMS Operating License + HPCSA/DoH
+    # Registration Document. The real Cloudinary API is never hit —
+    # accounts.serializers.cloudinary_upload is mocked directly, same
+    # approach this codebase already uses for every other external service
+    # call (Brevo, Google, Google Routes — see EmailOTPLoginTest/
+    # GoogleSignInTest/emergencies.tests.RouteEndpointTest).
 
-        before = self.client.post(login_url, {
-            "email": "reactivate-emt1@example.com", "password": "pass",
+    def setUp(self):
+        self.mera_admin = User.objects.create_user(
+            email="mera-docs@example.com", password="pass", role=Role.MERA_ADMIN,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.mera_admin)
+        self.hospital_url = reverse("admin-create-hospital-admin")
+        self.ambulance_url = reverse("admin-create-ambulance-admin")
+
+        patcher = patch("accounts.serializers.cloudinary_upload")
+        self.mock_upload = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_upload.return_value = {"secure_url": "https://res.cloudinary.com/mera-test/doc123.pdf"}
+
+    def _hospital_payload(self, **overrides):
+        payload = {
+            "email": "new-hospital-docs@example.com",
+            "password": "TestPass123!",
+            "confirm_password": "TestPass123!",
+            "facility_name": "Docs Test Hospital",
+        }
+        payload.update(overrides)
+        return payload
+
+    def _ambulance_payload(self, **overrides):
+        payload = {
+            "email": "new-ambulance-docs@example.com",
+            "password": "TestPass123!",
+            "confirm_password": "TestPass123!",
+            "service_name": "Docs Test EMS",
+        }
+        payload.update(overrides)
+        return payload
+
+    # --- Hospital ---------------------------------------------------------
+
+    def test_hospital_creation_succeeds_with_both_required_documents(self):
+        response = self.client.post(self.hospital_url, {
+            **self._hospital_payload(),
+            **_hospital_docs(),
         })
-        self.assertEqual(before.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
 
-        reactivate_url = reverse("admin-user-reactivate", args=[self.emt1.id])
-        response = self.client.patch(reactivate_url)
+        user = User.objects.get(email="new-hospital-docs@example.com")
+        self.assertEqual(user.health_facility_certificate_url, "https://res.cloudinary.com/mera-test/doc123.pdf")
+        self.assertEqual(user.cipc_registration_url, "https://res.cloudinary.com/mera-test/doc123.pdf")
+        # One Cloudinary upload call per document, not one for the whole request.
+        self.assertEqual(self.mock_upload.call_count, 2)
+
+    def test_hospital_creation_rejected_without_any_documents(self):
+        response = self.client.post(self.hospital_url, self._hospital_payload())
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("health_facility_certificate", response.data)
+        self.assertIn("cipc_registration_document", response.data)
+        self.assertFalse(User.objects.filter(email="new-hospital-docs@example.com").exists())
+        self.mock_upload.assert_not_called()
+
+    def test_hospital_creation_rejected_missing_only_cipc_document(self):
+        # Both documents are independently required — supplying only one
+        # must still fail, and must name specifically the missing one.
+        docs = _hospital_docs()
+        docs.pop("cipc_registration_document")
+        response = self.client.post(self.hospital_url, {**self._hospital_payload(), **docs})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cipc_registration_document", response.data)
+        self.assertNotIn("health_facility_certificate", response.data)
+
+    # --- Ambulance ----------------------------------------------------------
+
+    def test_ambulance_creation_succeeds_with_both_required_documents(self):
+        response = self.client.post(self.ambulance_url, {
+            **self._ambulance_payload(),
+            **_ambulance_docs(),
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+        user = User.objects.get(email="new-ambulance-docs@example.com")
+        self.assertEqual(user.ems_operating_license_url, "https://res.cloudinary.com/mera-test/doc123.pdf")
+        self.assertEqual(user.hpcsa_doh_registration_url, "https://res.cloudinary.com/mera-test/doc123.pdf")
+        self.assertEqual(self.mock_upload.call_count, 2)
+
+    def test_ambulance_creation_rejected_without_any_documents(self):
+        response = self.client.post(self.ambulance_url, self._ambulance_payload())
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("ems_operating_license", response.data)
+        self.assertIn("hpcsa_doh_registration_document", response.data)
+        self.assertFalse(User.objects.filter(email="new-ambulance-docs@example.com").exists())
+        self.mock_upload.assert_not_called()
+
+    def test_ambulance_creation_rejected_missing_only_hpcsa_document(self):
+        docs = _ambulance_docs()
+        docs.pop("hpcsa_doh_registration_document")
+        response = self.client.post(self.ambulance_url, {**self._ambulance_payload(), **docs})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("hpcsa_doh_registration_document", response.data)
+        self.assertNotIn("ems_operating_license", response.data)
+
+    # --- Retrieval by MERA admin -------------------------------------------
+
+    def test_document_urls_retrievable_via_institutions_list(self):
+        # Item 5: MERA admin can view/download these via the institutions
+        # endpoint, distinct URLs per document (not the same upload
+        # response reused blindly for both).
+        self.mock_upload.side_effect = [
+            {"secure_url": "https://res.cloudinary.com/mera-test/certificate.pdf"},
+            {"secure_url": "https://res.cloudinary.com/mera-test/cipc.pdf"},
+        ]
+        create_response = self.client.post(self.hospital_url, {
+            **self._hospital_payload(),
+            **_hospital_docs(),
+        })
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        new_user_id = create_response.data["user"]["id"]
+
+        list_response = self.client.get(reverse("admin-institutions"))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        row = next(r for r in list_response.data if r["id"] == new_user_id)
+        self.assertEqual(row["health_facility_certificate_url"], "https://res.cloudinary.com/mera-test/certificate.pdf")
+        self.assertEqual(row["cipc_registration_url"], "https://res.cloudinary.com/mera-test/cipc.pdf")
+        # The ambulance-only pair stays blank for a hospital row.
+        self.assertEqual(row["ems_operating_license_url"], "")
+        self.assertEqual(row["hpcsa_doh_registration_url"], "")
+
+    def test_documents_required_even_with_successor_of(self):
+        # Identity fields are inherited from the old account on reassignment,
+        # but the required-documents gate applies uniformly regardless —
+        # see the comment on HospitalAdminCreationSerializer's document
+        # fields for why fresh documents are still required here.
+        old_hospital = User.objects.create_user(
+            email="old-docs-hosp@example.com", password="pass", role=Role.HOSPITAL_ADMIN,
+            facility_name="Old Docs Hospital", is_active=False,
+        )
+        response = self.client.post(self.hospital_url, self._hospital_payload(
+            successor_of=str(old_hospital.id),
+        ))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("health_facility_certificate", response.data)
+
+
+@override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
+class TriggerPasswordResetTest(TestCase):
+    # POST /auth/admin/users/{id}/trigger-password-reset/ — MERA-admin
+    # side of this endpoint (unrestricted, any account). See
+    # TriggerPasswordResetPermissionsTest below for the ambulance_admin-
+    # scoped-to-own-EMTs caller and the hospital_admin rejection. Reuses
+    # the exact same PasswordResetToken mechanism the self-service flow
+    # uses (accounts/serializers.py::issue_password_reset_token) and the
+    # completely unmodified PasswordResetConfirmView/Serializer — there is
+    # no separate confirm endpoint for this flow. Brevo is mocked the same
+    # way EmailOTPLoginTest mocks it (accounts.views.requests.post), never
+    # hit for real.
+
+    def setUp(self):
+        self.mera_admin = User.objects.create_user(
+            email="mera-pwreset@example.com", password="pass", role=Role.MERA_ADMIN,
+        )
+        self.hospital = User.objects.create_user(
+            email="reset-target@example.com", password="OldPass123!", role=Role.HOSPITAL_ADMIN,
+            facility_name="Reset Target Hospital",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.mera_admin)
+
+        patcher = patch("accounts.views.requests.post")
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
+
+    def _trigger(self, user_id):
+        return self.client.post(reverse("admin-trigger-password-reset", args=[user_id]))
+
+    def _extract_token_from_email(self):
+        call = self.mock_post.call_args
+        text = call.kwargs["json"]["textContent"]
+        # "<WEB_FRONTEND_URL>/reset-password?token=<token>" — the token is
+        # everything after "token=" (token_urlsafe output has no query-
+        # string-unsafe characters, so this simple split is exact, not
+        # approximate).
+        return text.split("token=")[1].split()[0]
+
+    def test_trigger_sends_email_and_creates_unused_token(self):
+        response = self._trigger(self.hospital.id)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        after = self.client.post(login_url, {
-            "email": "reactivate-emt1@example.com", "password": "pass",
+        self.assertEqual(self.mock_post.call_count, 1)
+        call = self.mock_post.call_args
+        self.assertEqual(call.args[0], "https://api.brevo.com/v3/smtp/email")
+        self.assertEqual(call.kwargs["headers"]["api-key"], "test-brevo-key")
+        self.assertEqual(call.kwargs["json"]["to"], [{"email": "reset-target@example.com"}])
+        self.assertEqual(call.kwargs["json"]["sender"], {"email": "noreply@test.mera.example"})
+        self.assertEqual(call.kwargs["timeout"], 10.0)
+
+        token = PasswordResetToken.objects.get(user=self.hospital, used=False)
+        self.assertTrue(token.is_valid)
+
+    def test_generated_token_works_with_existing_confirm_endpoint(self):
+        self._trigger(self.hospital.id)
+        token_value = self._extract_token_from_email()
+
+        confirm_response = self.client.post(reverse("password-reset-confirm"), {
+            "token": token_value,
+            "new_password": "BrandNewPass456!",
+            "confirm_password": "BrandNewPass456!",
         })
-        self.assertEqual(after.status_code, status.HTTP_200_OK)
-        self.assertIn("access", after.data)
-        self.assertIn("refresh", after.data)
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+
+        self.hospital.refresh_from_db()
+        self.assertTrue(self.hospital.check_password("BrandNewPass456!"))
+        self.assertFalse(self.hospital.check_password("OldPass123!"))
+
+        used_token = PasswordResetToken.objects.get(token=token_value)
+        self.assertTrue(used_token.used)
+
+    def test_trigger_for_nonexistent_user_returns_404(self):
+        response = self._trigger(uuid.uuid4())
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.mock_post.assert_not_called()
+
+    def test_non_mera_admin_forbidden(self):
+        self.client.force_authenticate(user=self.hospital)
+        response = self._trigger(self.hospital.id)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.mock_post.assert_not_called()
+
+    def test_new_trigger_invalidates_previous_unused_token(self):
+        self._trigger(self.hospital.id)
+        first_token_value = self._extract_token_from_email()
+
+        self._trigger(self.hospital.id)
+        second_token_value = self._extract_token_from_email()
+
+        self.assertNotEqual(first_token_value, second_token_value)
+        first_token = PasswordResetToken.objects.get(token=first_token_value)
+        self.assertTrue(first_token.used)
+
+        # The old (now-invalidated) token must no longer work...
+        stale_confirm = self.client.post(reverse("password-reset-confirm"), {
+            "token": first_token_value,
+            "new_password": "ShouldNotWork123!",
+            "confirm_password": "ShouldNotWork123!",
+        })
+        self.assertEqual(stale_confirm.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # ...while the newest one still does.
+        fresh_confirm = self.client.post(reverse("password-reset-confirm"), {
+            "token": second_token_value,
+            "new_password": "ShouldWork123!",
+            "confirm_password": "ShouldWork123!",
+        })
+        self.assertEqual(fresh_confirm.status_code, status.HTTP_200_OK)
+
+    def test_delivery_failure_returns_503_and_creates_no_token(self):
+        self.mock_post.side_effect = requests.exceptions.Timeout("Brevo took too long")
+        response = self._trigger(self.hospital.id)
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        # Send-before-persist: a failed delivery must not leave a token
+        # behind for a link that was never actually emailed.
+        self.assertFalse(PasswordResetToken.objects.filter(user=self.hospital).exists())
+
+    def test_delivery_failure_leaves_existing_token_usable(self):
+        # A prior successful trigger already gave the user a live token;
+        # a second, failed attempt must not invalidate it.
+        self._trigger(self.hospital.id)
+        original_token_value = self._extract_token_from_email()
+
+        self.mock_post.side_effect = requests.exceptions.Timeout("Brevo took too long")
+        response = self._trigger(self.hospital.id)
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        original_token = PasswordResetToken.objects.get(token=original_token_value)
+        self.assertFalse(original_token.used)
+
+
+@override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
+class TriggerPasswordResetPermissionsTest(TestCase):
+    # POST /auth/admin/users/{id}/trigger-password-reset/ — the widened
+    # permission model: ambulance_admin (or legacy ambulance_service) may
+    # now trigger a reset for one of their own EMTs, scoped exactly the way
+    # EMTUpdateDeleteTest already proves EMTUpdateView is (role=EMT AND
+    # ambulance_service=caller, a mismatch or non-EMT target 404s rather
+    # than 403ing so ownership isn't leaked). MERA admin keeps unrestricted
+    # access — reconfirmed here against a non-hospital target too, since
+    # TriggerPasswordResetTest above only ever exercises it against a
+    # hospital_admin. hospital_admin gets no access at all (no subordinate
+    # accounts of their own to use this on).
+
+    def setUp(self):
+        self.mera_admin = User.objects.create_user(
+            email="mera-pwreset-perm@example.com", password="pass", role=Role.MERA_ADMIN,
+        )
+        self.ambulance = User.objects.create_user(
+            email="amb-pwreset@example.com", password="pass", role=Role.AMBULANCE_ADMIN,
+            service_name="Test EMS",
+        )
+        self.other_ambulance = User.objects.create_user(
+            email="other-amb-pwreset@example.com", password="pass", role=Role.AMBULANCE_SERVICE,
+            service_name="Other EMS",
+        )
+        self.own_emt = User.objects.create_user(
+            email="own-emt-pwreset@example.com", password="pass", role=Role.EMT,
+            full_name="Own EMT", ambulance_service=self.ambulance,
+        )
+        self.other_emt = User.objects.create_user(
+            email="other-emt-pwreset@example.com", password="pass", role=Role.EMT,
+            full_name="Other EMT", ambulance_service=self.other_ambulance,
+        )
+        self.hospital_admin = User.objects.create_user(
+            email="hosp-pwreset-perm@example.com", password="pass", role=Role.HOSPITAL_ADMIN,
+            facility_name="Perm Test Hospital",
+        )
+        self.client = APIClient()
+
+        patcher = patch("accounts.views.requests.post")
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
+
+    def _trigger(self, user_id):
+        return self.client.post(reverse("admin-trigger-password-reset", args=[user_id]))
+
+    def test_ambulance_admin_can_reset_own_emt(self):
+        self.client.force_authenticate(user=self.ambulance)
+        response = self._trigger(self.own_emt.id)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.mock_post.call_count, 1)
+        self.assertTrue(PasswordResetToken.objects.filter(user=self.own_emt, used=False).exists())
+
+    def test_ambulance_admin_cannot_reset_unrelated_emt(self):
+        self.client.force_authenticate(user=self.ambulance)
+        response = self._trigger(self.other_emt.id)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.mock_post.assert_not_called()
+        self.assertFalse(PasswordResetToken.objects.filter(user=self.other_emt).exists())
+
+    def test_ambulance_admin_cannot_reset_a_non_emt_account(self):
+        # Confirms the role=EMT filter, not just the ambulance_service FK,
+        # is actually enforced — an ambulance_admin shouldn't be able to
+        # target another institution's own admin account just because it's
+        # otherwise a valid user id.
+        self.client.force_authenticate(user=self.ambulance)
+        response = self._trigger(self.other_ambulance.id)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.mock_post.assert_not_called()
+
+    def test_hospital_admin_forbidden(self):
+        self.client.force_authenticate(user=self.hospital_admin)
+        response = self._trigger(self.own_emt.id)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.mock_post.assert_not_called()
+
+    def test_mera_admin_can_reset_any_role_including_an_emt(self):
+        self.client.force_authenticate(user=self.mera_admin)
+        response = self._trigger(self.other_emt.id)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(PasswordResetToken.objects.filter(user=self.other_emt, used=False).exists())
+
+
+@override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
+class PasswordResetRequestTest(TestCase):
+    # POST /auth/password-reset/ — self-service, unauthenticated, any role.
+    # Newly wired up to actually send email (accounts/views.py::
+    # PasswordResetRequestView) — previously this endpoint existed and
+    # created a token but never emailed it (a dead TODO). Reuses
+    # issue_password_reset_token/_send_password_reset_email, the same
+    # functions TriggerPasswordResetTest's flow uses, and the token this
+    # produces is consumed by the same unmodified PasswordResetConfirmView.
+    #
+    # Anti-enumeration is the actual point of this test class: an existing
+    # email, a nonexistent one, and an existing email whose send fails must
+    # all be indistinguishable from the response alone.
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="selfservice-target@example.com", password="OldPass123!", role=Role.HOSPITAL_ADMIN,
+            facility_name="Self Service Hospital",
+        )
+        self.client = APIClient()
+        self.url = reverse("password-reset-request")
+
+        patcher = patch("accounts.views.requests.post")
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
+
+    def _extract_token_from_email(self):
+        text = self.mock_post.call_args.kwargs["json"]["textContent"]
+        return text.split("token=")[1].split()[0]
+
+    def test_existing_email_sends_reset_email_and_creates_token(self):
+        response = self.client.post(self.url, {"email": "selfservice-target@example.com"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["detail"],
+            "A password reset link has been sent.",
+        )
+        self.assertEqual(self.mock_post.call_count, 1)
+        call = self.mock_post.call_args
+        self.assertEqual(call.kwargs["json"]["to"], [{"email": "selfservice-target@example.com"}])
+        self.assertTrue(PasswordResetToken.objects.filter(user=self.user, used=False).exists())
+
+    def test_nonexistent_email_returns_identical_response_with_no_side_effects(self):
+        existing = self.client.post(self.url, {"email": "selfservice-target@example.com"})
+        self.mock_post.reset_mock()
+
+        nonexistent = self.client.post(self.url, {"email": "no-such-account@example.com"})
+
+        # The whole point: same status, same body, regardless of whether
+        # the account exists.
+        self.assertEqual(nonexistent.status_code, existing.status_code)
+        self.assertEqual(nonexistent.data, existing.data)
+        self.mock_post.assert_not_called()
+        self.assertEqual(PasswordResetToken.objects.filter(user=self.user).count(), 1)
+
+    def test_delivery_failure_still_returns_the_same_generic_response(self):
+        # The critical anti-enumeration case: if this returned a distinct
+        # status/message when delivery fails, that distinction itself would
+        # leak "this email exists" — a 503-only-for-real-accounts response
+        # is just as much of a leak as a 404 would be.
+        self.mock_post.side_effect = requests.exceptions.Timeout("Brevo took too long")
+        response = self.client.post(self.url, {"email": "selfservice-target@example.com"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["detail"],
+            "A password reset link has been sent.",
+        )
+        # And no token left dangling for an email that was never delivered.
+        self.assertFalse(PasswordResetToken.objects.filter(user=self.user).exists())
+
+    def test_generated_token_works_with_confirm_endpoint(self):
+        self.client.post(self.url, {"email": "selfservice-target@example.com"})
+        token_value = self._extract_token_from_email()
+
+        confirm = self.client.post(reverse("password-reset-confirm"), {
+            "token": token_value,
+            "new_password": "BrandNewSelfServe456!",
+            "confirm_password": "BrandNewSelfServe456!",
+        })
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("BrandNewSelfServe456!"))
+
+    def test_missing_email_field_rejected(self):
+        response = self.client.post(self.url, {})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.mock_post.assert_not_called()
+
+    def test_repeated_requests_to_same_email_stop_sending_but_response_stays_identical(self):
+        # Closes the gap PROJECT_CONTEXT.md flagged: the general per-IP anon
+        # throttle doesn't bound "how many emails can one target inbox
+        # receive" — a caller spread across IPs could otherwise spam one
+        # address indefinitely. _password_reset_generation_allowed() caps
+        # real sends at PASSWORD_RESET_MAX_PER_WINDOW (3) per hour per
+        # account — this test proves both halves of that fix at once:
+        # real Brevo calls actually stop after the 3rd, AND the HTTP
+        # response is byte-for-byte identical on every single request,
+        # including the ones silently capped. A different response once
+        # the limit hits would itself be a new enumeration vector — it
+        # would reveal that this address had actually been receiving
+        # emails right up until it suddenly stopped.
+        first_response = self.client.post(self.url, {"email": "selfservice-target@example.com"})
+
+        for _ in range(2):  # 2 more = 3 total, the configured limit
+            response = self.client.post(self.url, {"email": "selfservice-target@example.com"})
+            self.assertEqual(response.status_code, first_response.status_code)
+            self.assertEqual(response.data, first_response.data)
+
+        self.assertEqual(self.mock_post.call_count, 3)
+
+        # One more, past the limit — no new Brevo call is made...
+        capped_response = self.client.post(self.url, {"email": "selfservice-target@example.com"})
+        self.assertEqual(self.mock_post.call_count, 3)
+        # ...but the response is still identical to every one before it.
+        self.assertEqual(capped_response.status_code, first_response.status_code)
+        self.assertEqual(capped_response.data, first_response.data)
+
+        # A couple more for good measure — stays capped, stays identical.
+        for _ in range(2):
+            again = self.client.post(self.url, {"email": "selfservice-target@example.com"})
+            self.assertEqual(self.mock_post.call_count, 3)
+            self.assertEqual(again.status_code, first_response.status_code)
+            self.assertEqual(again.data, first_response.data)
+
+        # And the account's own real requester isn't left with more than
+        # the intended number of live tokens either.
+        self.assertEqual(PasswordResetToken.objects.filter(user=self.user, used=False).count(), 1)
+        self.assertEqual(PasswordResetToken.objects.filter(user=self.user).count(), 3)
+
+
+@override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
+class ThrottlingTest(TestCase):
+    # DRF's throttling framework (settings.py's DEFAULT_THROTTLE_CLASSES/
+    # DEFAULT_THROTTLE_RATES) — previously entirely unconfigured. Covers
+    # both the general anon/user defaults and the two named scopes.
+    #
+    # The class-level CACHES override above opts this class back into a
+    # real cache — settings.py switches CACHES to DummyCache for the rest
+    # of the test run specifically so throttling doesn't interfere with
+    # every other, unrelated test (see that setting's own comment for why:
+    # Django's test client shares one fake IP across the whole suite, so a
+    # real cache would let anonymous calls from many unrelated test classes
+    # pile into one shared bucket). This class is the one place that real
+    # behavior is actually being tested, so it needs a real cache back.
+    #
+    # Testing approach, chosen specifically to avoid slow/flaky tests:
+    #  - The two SCOPED throttles (password_reset_trigger=5/hour,
+    #    institutional_documents=20/hour) are tested at their REAL
+    #    configured rate — the numbers are small enough that making that
+    #    many requests in a loop is fast and needs no rate manipulation.
+    #  - The GENERAL anon/user throttles are 30/min and 100/min — too many
+    #    requests to loop through quickly, so these tests instead mutate
+    #    AnonRateThrottle.THROTTLE_RATES/UserRateThrottle.THROTTLE_RATES
+    #    directly (the actual dict DRF's throttle classes read from at
+    #    request time — the same dict object for every SimpleRateThrottle
+    #    subclass, keyed by scope) down to a tiny rate just for that one
+    #    test, restored via addCleanup. This is deliberately NOT done via
+    #    @override_settings(REST_FRAMEWORK=...): DRF's throttle classes
+    #    cache DEFAULT_THROTTLE_RATES into their own THROTTLE_RATES class
+    #    attribute once, at import time, so re-overriding the Django
+    #    setting later doesn't actually change what an already-imported
+    #    throttle class reads — a real, documented DRF testing gotcha.
+    #    Mutating the dict in place sidesteps it entirely.
+    #  - cache.clear() in setUp/tearDown: throttle counters live in CACHES
+    #    (LocMemCache), which — unlike the DB — Django's test runner does
+    #    NOT reset between tests. Every other test in this file creates a
+    #    fresh user with a fresh random UUID per test, so authenticated
+    #    (user-keyed) throttle buckets never actually collide across tests
+    #    in practice — but ANONYMOUS throttle keys are IP-based, and every
+    #    request from Django's test client shares the same fake IP, so
+    #    without clearing the cache the anon test below could pass or fail
+    #    depending on what ran before it in the same process. Cleared both
+    #    directions (setUp and tearDown) to protect this class from state
+    #    left by other tests, and other tests from state left by this one.
+
+    def setUp(self):
+        cache.clear()
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_anonymous_general_throttle_triggers(self):
+        original_rate = AnonRateThrottle.THROTTLE_RATES.get("anon")
+        AnonRateThrottle.THROTTLE_RATES["anon"] = "3/min"
+        self.addCleanup(AnonRateThrottle.THROTTLE_RATES.__setitem__, "anon", original_rate)
+
+        client = APIClient()
+        url = reverse("password-reset-request")
+        for _ in range(3):
+            response = client.post(url, {"email": "throttle-anon@example.com"})
+            self.assertNotEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+        fourth = client.post(url, {"email": "throttle-anon@example.com"})
+        self.assertEqual(fourth.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_authenticated_general_throttle_triggers(self):
+        original_rate = UserRateThrottle.THROTTLE_RATES.get("user")
+        UserRateThrottle.THROTTLE_RATES["user"] = "3/min"
+        self.addCleanup(UserRateThrottle.THROTTLE_RATES.__setitem__, "user", original_rate)
+
+        user = User.objects.create_user(
+            email="throttle-user@example.com", password="pass", role=Role.PATIENT, full_name="Throttle Patient",
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+        url = reverse("me")
+
+        for _ in range(3):
+            response = client.get(url)
+            self.assertNotEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+        fourth = client.get(url)
+        self.assertEqual(fourth.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    @override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
+    def test_password_reset_trigger_scope_throttles_at_configured_rate(self):
+        with patch("accounts.views.requests.post") as mock_post:
+            mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
+
+            mera_admin = User.objects.create_user(
+                email="throttle-pwreset-mera@example.com", password="pass", role=Role.MERA_ADMIN,
+            )
+            target = User.objects.create_user(
+                email="throttle-pwreset-target@example.com", password="pass", role=Role.HOSPITAL_ADMIN,
+                facility_name="Throttle Target Hospital",
+            )
+            client = APIClient()
+            client.force_authenticate(user=mera_admin)
+            url = reverse("admin-trigger-password-reset", args=[target.id])
+
+            # Configured rate is 5/hour — real number, no mutation needed.
+            for _ in range(5):
+                response = client.post(url)
+                self.assertNotEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+            sixth = client.post(url)
+            self.assertEqual(sixth.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_institutional_documents_scope_throttles_at_configured_rate(self):
+        mera_admin = User.objects.create_user(
+            email="throttle-docs-mera@example.com", password="pass", role=Role.MERA_ADMIN,
+        )
+        client = APIClient()
+        client.force_authenticate(user=mera_admin)
+        url = reverse("admin-create-hospital-admin")
+
+        # Deliberately incomplete payload — the throttle check happens
+        # before serializer validation, so an otherwise-invalid request
+        # still counts and no real Cloudinary call is ever at risk here.
+        # Configured rate is 20/hour — real number, no mutation needed.
+        for _ in range(20):
+            response = client.post(url, {})
+            self.assertNotEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+        twenty_first = client.post(url, {})
+        self.assertEqual(twenty_first.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_institutional_documents_scope_shared_across_the_three_endpoints(self):
+        # DRF's ScopedRateThrottle keys on (scope, caller) only — not the
+        # specific view/URL — so the same admin splitting calls across
+        # HospitalAdminCreateView/AmbulanceAdminCreateView/
+        # InstitutionalDocumentUploadView hits one combined ceiling, per
+        # the shared-scope reasoning in settings.py's DEFAULT_THROTTLE_RATES
+        # comment. 10 + 10 + 1 = the 21st combined request, over the 20/hour
+        # limit, on a *third*, different endpoint from the first two.
+        mera_admin = User.objects.create_user(
+            email="throttle-shared-mera@example.com", password="pass", role=Role.MERA_ADMIN,
+        )
+        client = APIClient()
+        client.force_authenticate(user=mera_admin)
+        hospital_url = reverse("admin-create-hospital-admin")
+        ambulance_url = reverse("admin-create-ambulance-admin")
+        upload_url = reverse("institutional-documents")
+
+        for _ in range(10):
+            response = client.post(hospital_url, {})
+            self.assertNotEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        for _ in range(10):
+            response = client.post(ambulance_url, {})
+            self.assertNotEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+        twenty_first = client.post(upload_url, {})
+        self.assertEqual(twenty_first.status_code, status.HTTP_429_TOO_MANY_REQUESTS)

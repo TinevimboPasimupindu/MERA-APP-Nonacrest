@@ -44,11 +44,15 @@ export default function LoginScreen() {
     try {
       const data = await apiCall(ENDPOINTS.login, 'POST', { email, password });
 
-      // Patients get an OTP-required response here instead of tokens —
-      // see accounts/views.py::LoginView. Every other role's response is
-      // unchanged (tokens directly), so this branch is the only new thing
-      // in this handler; the else path below is exactly what this
-      // function already did before the OTP step existed.
+      // Patient and EMT accounts get an OTP-required response here
+      // instead of tokens — see accounts/views.py::LoginView's
+      // OTP_REQUIRED_ROLES. Every other role's response is unchanged
+      // (tokens directly), so this branch is the only new thing in this
+      // handler; the else path below is exactly what this function
+      // already did before the OTP step existed. Nothing here branches on
+      // role at all — otp_required is a plain boolean the backend already
+      // decided, so this screen doesn't need to know or care which role
+      // triggered it.
       if (data.otp_required) {
         router.replace({
           pathname: '/(auth)/verify-otp' as any,
@@ -130,8 +134,13 @@ export default function LoginScreen() {
         </View>
       </View>
 
-      {/* Forgot Password */}
-      <TouchableOpacity style={styles.forgotContainer}>
+      {/* Forgot Password — was a dead element with no onPress (left over
+          from the original mockup); now opens forgot-password.tsx, which
+          posts to the same self-service reset endpoint the web login uses. */}
+      <TouchableOpacity
+        style={styles.forgotContainer}
+        onPress={() => router.push('/(auth)/forgot-password' as any)}
+      >
         <Text style={styles.forgotText}>Forgot password?</Text>
       </TouchableOpacity>
 

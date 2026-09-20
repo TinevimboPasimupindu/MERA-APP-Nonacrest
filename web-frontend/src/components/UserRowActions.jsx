@@ -168,6 +168,24 @@ export default function UserRowActions({ user, onChanged }) {
     }
   };
 
+  // POST /auth/admin/users/{id}/trigger-password-reset/ — backend already
+  // returns {"detail": "Password reset email sent to <email>."} verbatim,
+  // so surfacing response.detail directly (same convention handleDeactivate/
+  // handleReactivate already use for a noteworthy result) is the whole
+  // "clear success message" requirement, no message built client-side.
+  const handleTriggerPasswordReset = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const response = await apiCall(ENDPOINTS.triggerPasswordReset(user.id), 'POST');
+      window.alert(response.detail);
+    } catch (err) {
+      setError(err.detail || 'Could not send the password reset email.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <div style={{ position: 'relative', display: 'inline-block' }} ref={ref}>
@@ -178,6 +196,14 @@ export default function UserRowActions({ user, onChanged }) {
           <div style={menuDropdownStyle}>
             <button type="button" style={menuItemStyle} onClick={() => { setOpen(false); setEditing(true); }}>
               Edit
+            </button>
+            <button
+              type="button"
+              style={menuItemStyle}
+              disabled={busy}
+              onClick={() => { setOpen(false); handleTriggerPasswordReset(); }}
+            >
+              {busy ? 'Sending…' : 'Reset Password'}
             </button>
             {isInactive ? (
               <button
@@ -225,7 +251,11 @@ const menuBtnStyle = { background: 'none', border: 'none', color: COLORS.ink, fo
 const menuDropdownStyle = { position: 'absolute', right: 0, top: '100%', marginTop: 4, background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.4)', zIndex: 20, minWidth: 150, overflow: 'hidden' };
 const menuItemStyle = { display: 'block', width: '100%', textAlign: 'left', background: 'none', border: 'none', color: COLORS.ink, fontSize: 12.5, fontWeight: 600, padding: '10px 14px', cursor: 'pointer' };
 const overlayStyle = { position: 'fixed', inset: 0, background: 'rgba(2,28,57,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, backdropFilter: 'blur(2px)' };
-const panelStyle = { background: COLORS.panel, borderRadius: 14, padding: 28, width: 420, boxShadow: '0 8px 30px rgba(0,0,0,0.55)' };
+// maxHeight + overflowY so a tall form scrolls internally instead of
+// overflowing the fixed-position overlay with no way to reach the rest of
+// it — see App.css's .modal-panel for the same fix applied to the other
+// modal style in this codebase (kept consistent, same values).
+const panelStyle = { background: COLORS.panel, borderRadius: 14, padding: 28, width: 420, maxWidth: '90vw', maxHeight: '90vh', overflowY: 'auto', boxSizing: 'border-box', boxShadow: '0 8px 30px rgba(0,0,0,0.55)' };
 const closeBtnStyle = { background: 'none', border: 'none', color: COLORS.inkMuted, fontSize: 13, cursor: 'pointer', fontWeight: 600 };
 const labelStyle = { display: 'block', fontSize: 12, fontWeight: 600, color: COLORS.inkMuted, marginBottom: 6 };
 const inputStyle = { width: '100%', padding: '10px 12px', borderRadius: 7, border: `1px solid ${COLORS.border}`, background: '#0F0F1A', color: COLORS.ink, fontSize: 13, boxSizing: 'border-box' };

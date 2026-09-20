@@ -11,6 +11,75 @@ const ROLES = [
   { value: 'ambulance_admin', label: 'Ambulance Admin' },
 ];
 
+// Self-service password reset (POST /auth/password-reset/) — same generic
+// "a reset link has been sent" message shown
+// regardless of outcome, matching the backend's own anti-enumeration
+// contract exactly: this modal doesn't (and can't) know whether the email
+// it just submitted matched a real account, or whether delivery even
+// succeeded, and showing anything more specific than the generic message
+// would just re-introduce client-side what the backend deliberately
+// doesn't reveal server-side.
+function ForgotPasswordModal({ onClose }) {
+  const [email, setEmail] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await apiCall(ENDPOINTS.passwordResetRequest, 'POST', { email }, false);
+    } catch {
+      // Deliberately ignored — the backend already returns this exact same
+      // response whether the account exists, doesn't, or delivery failed
+      // (see PROJECT_CONTEXT.md), so a caught error here has nothing more
+      // specific to say than the generic message shown either way.
+    } finally {
+      setLoading(false);
+      setSubmitted(true);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel card" onClick={(e) => e.stopPropagation()}>
+        <h2>Reset your password</h2>
+        {submitted ? (
+          <>
+            <p className="modal-body">
+              A password reset link has been sent.
+            </p>
+            <div className="row gap-sm" style={{ marginTop: 20, justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-primary" onClick={onClose}>Close</button>
+            </div>
+          </>
+        ) : (
+          <form onSubmit={submit}>
+            <p className="modal-body">Enter your account email and we'll send you a reset link.</p>
+            <div className="field" style={{ marginTop: 16 }}>
+              <label htmlFor="forgot-email">Email</label>
+              <input
+                id="forgot-email"
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@hospital.org"
+              />
+            </div>
+            <div className="row gap-sm" style={{ marginTop: 20, justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-ghost" onClick={onClose} disabled={loading}>Cancel</button>
+              <button type="submit" className="btn btn-primary" disabled={loading}>
+                {loading ? <span className="spinner" /> : 'Send reset link'}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
@@ -19,6 +88,7 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -105,6 +175,16 @@ export default function Login() {
             required
           />
 
+          <div style={{ textAlign: 'right', marginTop: '-0.4rem' }}>
+            <button
+              type="button"
+              className="login-footer-link"
+              onClick={() => setShowForgotPassword(true)}
+            >
+              Forgot Password?
+            </button>
+          </div>
+
           {error && <p className="error-text">{error}</p>}
 
           <button type="submit" disabled={loading}>
@@ -118,6 +198,10 @@ export default function Login() {
           Terms & Conditions
         </button>
       </div>
+
+      {showForgotPassword && (
+        <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />
+      )}
     </div>
   );
 }

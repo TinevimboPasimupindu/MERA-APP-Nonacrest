@@ -163,6 +163,7 @@ export default function EmtManagement() {
   const [showCreate, setShowCreate] = useState(false);
   const [editingEmt, setEditingEmt] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [resettingId, setResettingId] = useState(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -185,6 +186,25 @@ export default function EmtManagement() {
       window.alert(err.detail || 'Could not remove that EMT.');
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  // POST /auth/admin/users/{id}/trigger-password-reset/ — now permitted
+  // for an ambulance_admin against one of their own EMTs (see
+  // PROJECT_CONTEXT.md), same ownership scoping this page's edit/delete
+  // already rely on server-side. Same request/response handling
+  // UserRowActions.jsx's own Reset Password action uses: backend already
+  // returns {"detail": "Password reset email sent to <email>."} verbatim,
+  // so response.detail is the whole success message, no need to build one.
+  const handleResetPassword = async (emt) => {
+    setResettingId(emt.id);
+    try {
+      const response = await apiCall(ENDPOINTS.triggerPasswordReset(emt.id), 'POST');
+      window.alert(response.detail);
+    } catch (err) {
+      window.alert(err.detail || 'Could not send the password reset email.');
+    } finally {
+      setResettingId(null);
     }
   };
 
@@ -223,6 +243,14 @@ export default function EmtManagement() {
                   <td style={tdStyle}>
                     <div style={{ display: 'flex', gap: 8 }}>
                       <button type="button" onClick={() => setEditingEmt(e)} style={rowBtnStyle}>Edit</button>
+                      <button
+                        type="button"
+                        onClick={() => handleResetPassword(e)}
+                        disabled={resettingId === e.id}
+                        style={{ ...rowBtnStyle, opacity: resettingId === e.id ? 0.5 : 1 }}
+                      >
+                        {resettingId === e.id ? 'Sending…' : 'Reset Password'}
+                      </button>
                       <button
                         type="button"
                         onClick={() => handleDelete(e)}
@@ -269,7 +297,12 @@ const tdStyle = { padding: '14px 20px', color: COLORS.ink, textAlign: 'left' };
 const rowBtnStyle = { background: 'none', border: 'none', color: COLORS.navy, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', padding: 0 };
 const createBtnStyle = { padding: '10px 18px', borderRadius: 8, border: 'none', background: COLORS.navy, color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer' };
 const overlayStyle = { position: 'fixed', inset: 0, background: 'rgba(2,28,57,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, backdropFilter: 'blur(2px)' };
-const panelStyle = { background: COLORS.panel, borderRadius: 14, padding: 28, width: 420, boxShadow: SHADOW.modal };
+// maxHeight + overflowY + boxSizing: same modal-scrolling fix already
+// applied consistently everywhere else in this codebase (Institutions.jsx,
+// UserRowActions.jsx, App.css's .modal-panel) — this file's two modals had
+// the identical gap, just never exercised enough to notice since their
+// forms are short.
+const panelStyle = { background: COLORS.panel, borderRadius: 14, padding: 28, width: 420, maxWidth: '90vw', maxHeight: '90vh', overflowY: 'auto', boxSizing: 'border-box', boxShadow: SHADOW.modal };
 const closeBtnStyle = { background: 'none', border: 'none', color: COLORS.inkMuted, fontSize: 13, cursor: 'pointer', fontWeight: 600 };
 const labelStyle = { display: 'block', fontSize: 12, fontWeight: 600, color: COLORS.inkMuted, marginBottom: 6 };
 const inputStyle = { width: '100%', padding: '10px 12px', borderRadius: 7, border: `1px solid ${COLORS.border}`, background: '#0F0F1A', color: COLORS.ink, fontSize: 13, boxSizing: 'border-box' };
