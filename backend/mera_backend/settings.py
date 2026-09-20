@@ -97,10 +97,17 @@ WEB_FRONTEND_URL = os.environ.get("WEB_FRONTEND_URL", "http://localhost:5173")
 # and AmbulanceAdminCreationSerializer). Not local disk (MEDIA_ROOT), because
 # Render's filesystem is ephemeral — anything written to disk is lost on the
 # next deploy/restart, which would silently orphan every uploaded document.
-# django-cloudinary-storage reads these three from the CLOUDINARY_STORAGE
-# dict below and configures the underlying `cloudinary` SDK from them
-# automatically at app startup. Same "secrets never go in Git" rule as
-# every other credential here.
+# Uploads go through the `cloudinary` SDK directly
+# (accounts/serializers.py::_upload_institutional_document ->
+# cloudinary.uploader.upload), which picks up its credentials from the same
+# three CLOUDINARY_* env vars read below — it does not need the
+# django-cloudinary-storage *app* (`cloudinary_storage`) registered in
+# INSTALLED_APPS; see the comment there for why that app must stay out.
+# CLOUDINARY_STORAGE and DEFAULT_FILE_STORAGE remain for the older
+# FileField-based InstitutionalDocument upload path, which does go through
+# django-cloudinary-storage's storage class (importable by dotted path
+# without the app installed). Same "secrets never go in Git" rule as every
+# other credential here.
 CLOUDINARY_STORAGE = {
     "CLOUD_NAME": os.environ.get("CLOUDINARY_CLOUD_NAME"),
     "API_KEY": os.environ.get("CLOUDINARY_API_KEY"),
@@ -129,12 +136,29 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
-
-    # cloudinary_storage must be registered before django.contrib.staticfiles
-    # (django-cloudinary-storage's own requirement — it patches the storage
-    # backends staticfiles' app registry relies on).
-    "cloudinary_storage",
     "django.contrib.staticfiles",
+
+    # "cloudinary" (the SDK) is the only Cloudinary entry here. Deliberately
+    # NOT "cloudinary_storage" (the django-cloudinary-storage Django app):
+    # that app ships its own `collectstatic` command which, once installed,
+    # replaces Django's — and its copy_file() silently copies nothing unless
+    # STATICFILES_STORAGE is Cloudinary's own static storage or
+    # --upload-unhashed-files is passed. Here static files are served by
+    # WhiteNoise (STATICFILES_STORAGE below), so with it installed
+    # collectstatic copied zero files into STATIC_ROOT and WhiteNoise's
+    # manifest post-processing then failed on the first file a CSS file
+    # referenced ("The CSS file 'admin/css/base.css' references a file which
+    # could not be found: admin/img/sorting-icons.svg") — which broke the
+    # Render build.
+    #
+    # It was originally added on the mistaken belief that it "must be
+    # registered before django.contrib.staticfiles". That ordering advice
+    # only applies when Cloudinary is meant to host static files — the
+    # opposite of this setup, where Cloudinary only stores uploaded
+    # documents. Nothing here needs the app registered (see the comment on
+    # CLOUDINARY_STORAGE above); DEFAULT_FILE_STORAGE's class is imported by
+    # dotted path and works without it. Don't re-add it unless static files
+    # are deliberately being moved to Cloudinary.
     "cloudinary",
 
     # Third-party
