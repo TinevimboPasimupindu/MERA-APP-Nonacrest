@@ -2,15 +2,17 @@ from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import Mock, patch
 
+import httpx
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from accounts.models import InstitutionalStatus, Role, User
+from emergency_contacts.models import EmergencyContact
 from medical_profiles.models import VerificationStatus
 from .models import Incident, IncidentStatus
-from . import services
+from . import services, sms_service
 
 
 def make_verified_patient(email="p@test.com"):
@@ -145,9 +147,347 @@ class SOSConfirmTest(TestCase):
         services.confirm_sos(incident)
         incident.refresh_from_db()
         self.assertEqual(incident.status, IncidentStatus.ACTIVE)
-        # confirm_sos() calls the shared _notify() stub twice — once for
-        # emergency contacts, once for ambulance services (see services.py).
-        self.assertEqual(mock_notify.call_count, 2)
+        # confirm_sos() still calls the shared _notify() stub once, for
+        # ambulance services. The emergency-contact half is a real SMS now
+        # (see EmergencyContactSMSTest below), no longer a _notify stub.
+        self.assertEqual(mock_notify.call_count, 1)
+
+
+# Emergency-contact SMS (Twilio). The real Twilio API is never hit:
+# emergencies.sms_service.httpx.post is mocked, same approach as
+# RouteEndpointTest below does for Google. Settings are supplied via
+# override_settings since the real .env may not have Twilio configured.
+
+TWILIO_TEST_SETTINGS = dict(
+    TWILIO_ACCOUNT_SID="ACtest",
+    TWILIO_AUTH_TOKEN="test-token",
+    TWILIO_FROM_NUMBER="+15005550006",
+    SMS_DEFAULT_COUNTRY_CODE="+27",
+    # Pinned off so a local .env with TWILIO_TRIAL_MODE=True can't change
+    # what the body-asserting tests below see.
+    TWILIO_TRIAL_MODE=False,
+)
+
+
+def make_contact(patient, phone, name="Contact", priority=1):
+    return EmergencyContact.objects.create(
+        patient=patient, full_name=name, phone_number=phone, priority_order=priority,
+    )
+
+
+def ok_twilio_response():
+    response = Mock()
+    response.raise_for_status = Mock()
+    return response
+
+
+def sent_to(mock_post):
+    return [c.kwargs["data"]["To"] for c in mock_post.call_args_list]
+
+
+def sent_bodies(mock_post):
+    return [c.kwargs["data"]["Body"] for c in mock_post.call_args_list]
+
+
+class PhoneNormalizationTest(TestCase):
+
+    @override_settings(SMS_DEFAULT_COUNTRY_CODE="+27")
+    def test_normalizes_to_e164(self):
+        n = sms_service.normalize_phone_number
+        self.assertEqual(n("0821234567"), "+27821234567")
+        self.assertEqual(n("082 123 4567"), "+27821234567")
+        self.assertEqual(n("+27821234567"), "+27821234567")
+        self.assertEqual(n("0027821234567"), "+27821234567")
+        self.assertEqual(n("27821234567"), "+27821234567")
+        self.assertEqual(n("821234567"), "+27821234567")
+        self.assertEqual(n("+14155550123"), "+14155550123")
+
+    @override_settings(SMS_DEFAULT_COUNTRY_CODE="+27")
+    def test_unusable_numbers_return_none(self):
+        self.assertIsNone(sms_service.normalize_phone_number(""))
+        self.assertIsNone(sms_service.normalize_phone_number(None))
+        self.assertIsNone(sms_service.normalize_phone_number("+12"))
+        self.assertIsNone(sms_service.normalize_phone_number("abc"))
+
+
+@override_settings(**TWILIO_TEST_SETTINGS)
+class SendSMSTest(TestCase):
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_posts_to_twilio_with_timeout_and_e164_number(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        self.assertTrue(sms_service.send_sms("0821234567", "hello"))
+
+        args, kwargs = mock_post.call_args
+        self.assertEqual(args[0], "https://api.twilio.com/2010-04-01/Accounts/ACtest/Messages.json")
+        self.assertEqual(kwargs["data"], {"To": "+27821234567", "From": "+15005550006", "Body": "hello"})
+        self.assertEqual(kwargs["auth"], ("ACtest", "test-token"))
+        self.assertIsNotNone(kwargs["timeout"])
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_real_body_is_sent_when_trial_mode_is_off(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        with override_settings(TWILIO_TRIAL_MODE=False):
+            sms_service.send_sms("0821234567", "Real message content")
+        self.assertEqual(mock_post.call_args.kwargs["data"]["Body"], "Real message content")
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_trial_mode_replaces_body_with_template_name_only(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        with override_settings(TWILIO_TRIAL_MODE=True):
+            self.assertTrue(sms_service.send_sms("0821234567", "Real message content"))
+        data = mock_post.call_args.kwargs["data"]
+        self.assertEqual(data["Body"], "sms_account_alerts")
+        # Everything else about the request is untouched by the flag.
+        self.assertEqual(data["To"], "+27821234567")
+        self.assertEqual(data["From"], "+15005550006")
+
+    @override_settings(TWILIO_ACCOUNT_SID=None, TWILIO_AUTH_TOKEN=None, TWILIO_FROM_NUMBER=None)
+    @patch("emergencies.sms_service.httpx.post")
+    def test_unconfigured_twilio_is_a_quiet_no_op(self, mock_post):
+        self.assertFalse(sms_service.send_sms("0821234567", "hello"))
+        mock_post.assert_not_called()
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_unparseable_number_is_skipped(self, mock_post):
+        self.assertFalse(sms_service.send_sms("abc", "hello"))
+        mock_post.assert_not_called()
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_http_error_returns_false_without_raising(self, mock_post):
+        bad = Mock()
+        bad.status_code = 400
+        bad.text = '{"message": "unverified number"}'
+        bad.raise_for_status.side_effect = httpx.HTTPStatusError("400", request=Mock(), response=bad)
+        mock_post.return_value = bad
+        self.assertFalse(sms_service.send_sms("0821234567", "hello"))
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_timeout_returns_false_without_raising(self, mock_post):
+        mock_post.side_effect = httpx.ConnectTimeout("timed out")
+        self.assertFalse(sms_service.send_sms("0821234567", "hello"))
+
+
+@override_settings(**TWILIO_TEST_SETTINGS)
+class EmergencyContactSMSTest(TestCase):
+    # The three triggers, all reading the same patient.emergency_contacts.
+    # SOS_ALERT_DELAY_SECONDS is 0 under `manage.py test` (settings.py), which
+    # runs the alert inline instead of on a Timer thread — so confirm_sos()
+    # can be asserted on directly with no sleeping.
+
+    def setUp(self):
+        self.patient = make_verified_patient()
+        self.contact_a = make_contact(self.patient, "0821234567", "A", 1)
+        self.contact_b = make_contact(self.patient, "+27831234567", "B", 2)
+        self.incident = Incident.objects.create(
+            patient=self.patient,
+            status=IncidentStatus.PENDING_CONFIRMATION,
+            latitude=Decimal("-26.204100"),
+            longitude=Decimal("28.047300"),
+        )
+
+    # Trigger 1: initial alert
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_confirm_sends_initial_alert_to_every_contact_and_records_it(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        services.confirm_sos(self.incident)
+
+        self.assertEqual(sorted(sent_to(mock_post)), ["+27821234567", "+27831234567"])
+        expected = (
+            "Test Patient has triggered a medical emergency via MERA. "
+            "Location: https://www.google.com/maps?q=-26.204100,28.047300"
+        )
+        self.assertEqual(sent_bodies(mock_post), [expected, expected])
+        self.incident.refresh_from_db()
+        self.assertIsNotNone(self.incident.emergency_contact_alert_sent_at)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_alert_without_coordinates_says_location_unavailable(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        self.incident.latitude = None
+        self.incident.longitude = None
+        self.incident.save()
+        services.confirm_sos(self.incident)
+        self.assertEqual(
+            sent_bodies(mock_post)[0],
+            "Test Patient has triggered a medical emergency via MERA. Location unavailable.",
+        )
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_cancelled_before_alert_fires_sends_nothing(self, mock_post):
+        # The timer callback re-fetches from the DB: `self.incident` in
+        # memory is still ACTIVE here, but the row says CANCELLED.
+        self.incident.status = IncidentStatus.ACTIVE
+        self.incident.save()
+        Incident.objects.filter(pk=self.incident.pk).update(status=IncidentStatus.CANCELLED)
+
+        services._send_contact_alert(self.incident.id)
+
+        mock_post.assert_not_called()
+        self.incident.refresh_from_db()
+        self.assertIsNone(self.incident.emergency_contact_alert_sent_at)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_alert_for_deleted_incident_is_skipped(self, mock_post):
+        incident_id = self.incident.id
+        self.incident.delete()
+        services._send_contact_alert(incident_id)
+        mock_post.assert_not_called()
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_alert_is_not_sent_twice(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        self.incident.status = IncidentStatus.ACTIVE
+        self.incident.save()
+        services._send_contact_alert(self.incident.id)
+        services._send_contact_alert(self.incident.id)
+        self.assertEqual(mock_post.call_count, 2)  # two contacts, once
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_no_contacts_means_alert_not_recorded_as_sent(self, mock_post):
+        EmergencyContact.objects.all().delete()
+        services.confirm_sos(self.incident)
+        mock_post.assert_not_called()
+        self.incident.refresh_from_db()
+        self.assertIsNone(self.incident.emergency_contact_alert_sent_at)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_twilio_outage_does_not_break_confirm(self, mock_post):
+        mock_post.side_effect = httpx.ConnectTimeout("timed out")
+        services.confirm_sos(self.incident)
+        self.incident.refresh_from_db()
+        self.assertEqual(self.incident.status, IncidentStatus.ACTIVE)
+        self.assertIsNone(self.incident.emergency_contact_alert_sent_at)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_one_failing_contact_does_not_stop_the_others(self, mock_post):
+        mock_post.side_effect = [httpx.ConnectTimeout("timed out"), ok_twilio_response()]
+        services.confirm_sos(self.incident)
+        self.assertEqual(mock_post.call_count, 2)
+        self.incident.refresh_from_db()
+        self.assertIsNotNone(self.incident.emergency_contact_alert_sent_at)
+
+    @override_settings(SOS_ALERT_DELAY_SECONDS=6)
+    @patch("emergencies.sms_service.httpx.post")
+    @patch("emergencies.services.threading.Timer")
+    def test_confirm_starts_a_daemon_timer_with_configured_delay(self, mock_timer, mock_post):
+        services.confirm_sos(self.incident)
+
+        mock_timer.assert_called_once_with(
+            6, services._contact_alert_thread_entry, args=(self.incident.id,),
+        )
+        self.assertTrue(mock_timer.return_value.daemon)
+        mock_timer.return_value.start.assert_called_once()
+        mock_post.assert_not_called()  # nothing goes out until the timer fires
+
+    @patch("emergencies.services._send_contact_alert")
+    @patch("emergencies.services.close_old_connections")
+    def test_thread_entry_closes_db_connections_at_start_and_end(self, mock_close, mock_send):
+        services._contact_alert_thread_entry(self.incident.id)
+        self.assertEqual(mock_close.call_count, 2)
+        mock_send.assert_called_once_with(self.incident.id)
+
+    @patch("emergencies.services._send_contact_alert", side_effect=RuntimeError("boom"))
+    @patch("emergencies.services.close_old_connections")
+    def test_thread_entry_closes_connections_even_if_alert_raises(self, mock_close, mock_send):
+        services._contact_alert_thread_entry(self.incident.id)  # must not raise
+        self.assertEqual(mock_close.call_count, 2)
+
+    # Trigger 2: cancellation notice
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_cancel_after_alert_sent_notifies_contacts(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        services.confirm_sos(self.incident)
+        mock_post.reset_mock()
+
+        services.cancel_incident(self.incident, cancelled_by=self.patient)
+
+        self.assertEqual(sorted(sent_to(mock_post)), ["+27821234567", "+27831234567"])
+        self.assertEqual(
+            sent_bodies(mock_post)[0], "Test Patient's MERA emergency alert has been cancelled."
+        )
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_cancel_inside_delay_window_sends_nothing(self, mock_post):
+        # Alert never went out (emergency_contact_alert_sent_at is null):
+        # nothing to retract, and the pending timer will skip on CANCELLED.
+        self.incident.status = IncidentStatus.ACTIVE
+        self.incident.save()
+        services.cancel_incident(self.incident, cancelled_by=self.patient)
+        mock_post.assert_not_called()
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_cancel_sees_alert_sent_by_timer_after_incident_was_loaded(self, mock_post):
+        # `self.incident` was loaded before the alert was recorded; the
+        # cancel check must read the DB, not the stale in-memory object.
+        mock_post.return_value = ok_twilio_response()
+        self.incident.status = IncidentStatus.ACTIVE
+        self.incident.save()
+        Incident.objects.filter(pk=self.incident.pk).update(
+            emergency_contact_alert_sent_at=timezone.now()
+        )
+        self.assertIsNone(self.incident.emergency_contact_alert_sent_at)
+
+        services.cancel_incident(self.incident, cancelled_by=self.patient)
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_twilio_outage_does_not_break_cancel(self, mock_post):
+        mock_post.side_effect = httpx.ConnectTimeout("timed out")
+        self.incident.status = IncidentStatus.ACTIVE
+        self.incident.emergency_contact_alert_sent_at = timezone.now()
+        self.incident.save()
+        services.cancel_incident(self.incident, cancelled_by=self.patient)
+        self.incident.refresh_from_db()
+        self.assertEqual(self.incident.status, IncidentStatus.CANCELLED)
+
+    # Trigger 3: hospital selected
+
+    def _dispatched_incident_with_hospital(self):
+        ambulance = make_ambulance()
+        hospital = User.objects.create_user(
+            email="hosp@test.com", password="pass", role=Role.HOSPITAL,
+            facility_name="Charlotte Maxeke",
+        )
+        incident = Incident.objects.create(
+            patient=self.patient, status=IncidentStatus.DISPATCHED, ambulance_service=ambulance,
+        )
+        return ambulance, hospital, incident
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_select_hospital_always_notifies_contacts_even_without_prior_alert(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        ambulance, hospital, incident = self._dispatched_incident_with_hospital()
+
+        client = APIClient()
+        client.force_authenticate(user=ambulance)
+        response = client.post(
+            f"/api/incidents/{incident.id}/select_hospital/",
+            {"hospital_user_id": str(hospital.id), "eta_minutes": 12},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(sorted(sent_to(mock_post)), ["+27821234567", "+27831234567"])
+        self.assertEqual(
+            sent_bodies(mock_post)[0], "Test Patient is being taken to Charlotte Maxeke by ambulance."
+        )
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_twilio_outage_does_not_break_select_hospital(self, mock_post):
+        mock_post.side_effect = httpx.ConnectTimeout("timed out")
+        ambulance, hospital, incident = self._dispatched_incident_with_hospital()
+
+        client = APIClient()
+        client.force_authenticate(user=ambulance)
+        response = client.post(
+            f"/api/incidents/{incident.id}/select_hospital/",
+            {"hospital_user_id": str(hospital.id), "eta_minutes": 12},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        incident.refresh_from_db()
+        self.assertEqual(incident.destination_hospital_id, hospital.id)
 
 
 class SOSCancelTest(TestCase):

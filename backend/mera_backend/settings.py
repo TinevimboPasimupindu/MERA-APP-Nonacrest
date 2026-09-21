@@ -81,6 +81,31 @@ GOOGLE_IOS_CLIENT_ID = os.environ.get("GOOGLE_IOS_CLIENT_ID")
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
 BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL")
 
+# SMS — Twilio, used to notify a patient's emergency contacts (see
+# emergencies/sms_service.py and services.confirm_sos / cancel_incident /
+# select_destination_hospital). Called over Twilio's plain HTTPS REST API
+# via httpx (same approach as the Google Routes call and the Brevo call
+# above), not the `twilio` SDK — no new dependency for a single endpoint.
+# All three unset = SMS quietly disabled (logged, never raised), so local
+# dev and the test suite need no Twilio account. Twilio *trial* accounts
+# can only message pre-verified numbers.
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")
+# Prepended to contact numbers saved in local format (leading 0) — the
+# EmergencyContact.phone_number validator accepts those, but Twilio needs
+# E.164. South Africa by default, matching the project's locale.
+SMS_DEFAULT_COUNTRY_CODE = os.environ.get("SMS_DEFAULT_COUNTRY_CODE", "+27")
+# TEMPORARY, for an unfunded Twilio trial account only: trial accounts may
+# only send a fixed set of template names as the message body to
+# international numbers (custom text is rejected with error 572006). When
+# True, sms_service.send_sms() discards the real body and sends a template
+# name instead — enough to verify the plumbing (timing, delay, cancel
+# suppression, delivery) but NOT the message content. Leave False (or unset)
+# on any funded account; flipping it back restores real content, nothing
+# else changes.
+TWILIO_TRIAL_MODE = os.environ.get("TWILIO_TRIAL_MODE", "False").strip().lower() in ("1", "true", "yes")
+
 # The deployed web-frontend's own URL — used only to build links this
 # backend emails out (currently just the password-reset link; see
 # accounts/views.py::_send_password_reset_email), never returned in any
@@ -266,6 +291,17 @@ CACHES = {
         ),
     }
 }
+
+# Seconds between an SOS being confirmed and the initial SMS going out to the
+# patient's emergency contacts (services.confirm_sos starts a threading.Timer
+# for it — in-process on purpose, no Celery/Redis; see the module docstring
+# at the top of this file). The gap is the patient's window to cancel a
+# false alarm before contacts are told anything. 0 = no timer at all: the
+# alert logic runs inline, which is what the test run does so no test ever
+# spawns a real background thread.
+SOS_ALERT_DELAY_SECONDS = float(
+    os.environ.get("SOS_ALERT_DELAY_SECONDS", "0" if TESTING else "6")
+)
 
 # ── REST Framework ────────────────────────────────────────────────────────── #
 REST_FRAMEWORK = {
