@@ -150,6 +150,12 @@ class Incident(models.Model):
     )
     cancellation_reason = models.TextField(blank=True, default="")
 
+    # Set when the initial SMS to the patient's emergency contacts actually
+    # goes out (see services._send_contact_alert). cancel_incident() reads
+    # this to decide whether contacts need a follow-up cancellation notice:
+    # null means they were never told, so there's nothing to retract.
+    emergency_contact_alert_sent_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

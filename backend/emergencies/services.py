@@ -1,15 +1,18 @@
 """
 Emergency services — prototype version.
-Notifications are replaced with logger.info stubs (no notifications app needed).
+Push notifications are replaced with logger.info stubs (no notifications app
+needed); SMS to a patient's emergency contacts is real (Twilio — sms_service.py).
 WebSocket broadcast is a no-op (no Channels/Redis needed).
 """
 import logging
+import threading
 
 import httpx
 from django.conf import settings
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
+from . import sms_service
 from .models import (
     ActivationMethod,
     EmergencyLog,
@@ -42,6 +45,86 @@ def _broadcast_ws(group_name: str, payload: dict) -> None:
 def _notify(msg: str, *args) -> None:
     """Stub for SMS/push — logs to console instead of sending."""
     logger.info("[NOTIFY STUB] " + msg, *args)
+
+
+# Emergency-contact SMS (Twilio — see sms_service.py)
+
+def _sms_emergency_contacts(patient, body: str) -> int:
+    # Every SMS to contacts goes through here so a notification failure of
+    # any kind (Twilio down, DB hiccup reading contacts, ...) is logged and
+    # swallowed — it must never block or roll back the incident action that
+    # triggered it, same rule as the OTP email path.
+    try:
+        return sms_service.notify_emergency_contacts(patient, body)
+    except Exception:  # noqa: BLE001
+        logger.exception("Emergency-contact SMS failed for patient %s.", patient.id)
+        return 0
+
+
+def _send_contact_alert(incident_id) -> None:
+    # The body of the delayed initial alert. Takes an id, not an Incident,
+    # and re-fetches: this runs seconds after confirm_sos() on a different
+    # thread, and the patient may well have cancelled in between — an
+    # in-memory Incident from before the delay would still say ACTIVE.
+    try:
+        incident = Incident.objects.select_related("patient").get(pk=incident_id)
+    except Incident.DoesNotExist:
+        logger.warning("Contact alert skipped: incident %s no longer exists.", incident_id)
+        return
+
+    if incident.status == IncidentStatus.CANCELLED:
+        logger.info("Contact alert skipped: incident %s was cancelled before the alert went out.", incident.id)
+        return
+    if incident.emergency_contact_alert_sent_at is not None:
+        return
+
+    name = incident.patient.get_full_name()
+    if incident.latitude is not None and incident.longitude is not None:
+        where = f"Location: https://www.google.com/maps?q={incident.latitude},{incident.longitude}"
+    else:
+        # The patient can decline the location permission; the app then
+        # sends null coordinates.
+        where = "Location unavailable."
+    sent = _sms_emergency_contacts(
+        incident.patient, f"{name} has triggered a medical emergency via MERA. {where}"
+    )
+
+    # Only mark contacts as told if at least one message really went out —
+    # cancel_incident() keys the follow-up "cancelled" notice off this, and
+    # retracting an alert nobody received would just be confusing.
+    if sent:
+        incident.emergency_contact_alert_sent_at = timezone.now()
+        incident.save(update_fields=["emergency_contact_alert_sent_at", "updated_at"])
+
+
+def _contact_alert_thread_entry(incident_id) -> None:
+    # threading.Timer target. Runs outside any request, so Django's
+    # request-end connection cleanup never happens for this thread's DB
+    # connection — close it explicitly on the way in and out or it leaks.
+    close_old_connections()
+    try:
+        _send_contact_alert(incident_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Contact alert failed for incident %s.", incident_id)
+    finally:
+        close_old_connections()
+
+
+def _schedule_contact_alert(incident_id) -> None:
+    # In-process timer, deliberately no Celery/Redis (see settings.py's note
+    # on what was removed for the prototype). Consequence worth knowing: a
+    # worker restart/deploy inside the delay window silently drops the alert.
+    delay = settings.SOS_ALERT_DELAY_SECONDS
+    if delay <= 0:
+        # No delay configured (the test-run default): run inline, no thread.
+        try:
+            _send_contact_alert(incident_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Contact alert failed for incident %s.", incident_id)
+        return
+    timer = threading.Timer(delay, _contact_alert_thread_entry, args=(incident_id,))
+    timer.daemon = True  # never hold up interpreter shutdown for a pending alert
+    timer.start()
 
 
 # SOS Trigger
@@ -111,7 +194,11 @@ def confirm_sos(incident: Incident, method: str = ActivationMethod.MANUAL) -> In
         event = "sos_auto_confirmed" if method == ActivationMethod.AUTO else "sos_confirmed"
         _log(incident, event, actor=incident.patient)
 
-    _notify("Emergency contacts for patient %s would be SMS'd.", incident.patient_id)
+    # Started from confirmation, not from trigger_sos(): an incident that was
+    # triggered but never confirmed never goes live, so contacts shouldn't be
+    # told about it. The status-is-not-CANCELLED check happens when the
+    # timer fires, in _send_contact_alert().
+    _schedule_contact_alert(incident.id)
     _notify("Nearby ambulance services would be push-notified (Incident %s).", incident.id)
 
     logger.info("SOS confirmed (%s) — Incident %s", method, incident.id)
@@ -137,6 +224,22 @@ def cancel_incident(incident: Incident, cancelled_by, reason: str = "") -> Incid
     with transaction.atomic():
         incident.cancel(cancelled_by_user=cancelled_by, reason=reason)
         _log(incident, "sos_cancelled", description=reason, actor=cancelled_by)
+
+    # Contacts only get a cancellation notice if they were actually told
+    # about the emergency. Not yet told (still inside the alert delay) means
+    # nothing to retract — the pending timer sees CANCELLED and sends
+    # nothing. Read from the DB, not `incident`: the timer thread may have
+    # set this after this request loaded the object.
+    alert_sent_at = (
+        Incident.objects.filter(pk=incident.pk)
+        .values_list("emergency_contact_alert_sent_at", flat=True)
+        .first()
+    )
+    if alert_sent_at is not None:
+        _sms_emergency_contacts(
+            incident.patient,
+            f"{incident.patient.get_full_name()}'s MERA emergency alert has been cancelled.",
+        )
 
     # Only DISPATCHED/ON_THE_WAY cancellations have an ambulance assigned
     # yet to notify — the pre-dispatch statuses above never had one. The
@@ -179,6 +282,13 @@ def select_destination_hospital(incident: Incident, hospital_user, eta_minutes: 
     incident.save(update_fields=["destination_hospital", "eta_minutes", "updated_at"])
     _log(incident, "hospital_notified", description=f"ETA: {eta_minutes} min")
     _notify("Hospital %s would be push-notified (ETA %d min).", hospital_user.id, eta_minutes)
+    # Always sent — deliberately no check against whether the initial alert
+    # has gone out yet; in a fast dispatch contacts may see both messages
+    # arrive close together, and the initial one still explains the context.
+    _sms_emergency_contacts(
+        incident.patient,
+        f"{incident.patient.get_full_name()} is being taken to {hospital_user.get_full_name()} by ambulance.",
+    )
     return incident
 
 
