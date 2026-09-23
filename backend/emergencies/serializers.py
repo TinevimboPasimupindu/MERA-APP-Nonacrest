@@ -1,5 +1,6 @@
+from django.conf import settings
 from rest_framework import serializers
-from .models import EmergencyLog, Incident, IncidentStatus, TreatmentNote
+from .models import EmergencyLog, Incident, IncidentStatus, NFCTag, TreatmentNote
 
 # Emergency Log
 
@@ -206,16 +207,39 @@ class IncidentHospitalIncomingSerializer(serializers.ModelSerializer):
 
 # SOS Trigger input serializer
 
-class SOSTriggerSerializer(serializers.Serializer):
-    latitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False, allow_null=True)
-    longitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False, allow_null=True)
+# Coordinates are REQUIRED on every trigger path (this one and the public NFC
+# one below): MERA can't send help to the right place without them, and a
+# location-less incident used to be created silently when the device denied
+# permission / had GPS off. The clients now block the trigger until they have
+# a fix (mobile falls back to last-known; the NFC web page shows a retry
+# state) — this is the server-side backstop, so a client that skips that
+# check gets a clear 400 instead of an incident nobody can locate. Range
+# limits reject nonsense values (a DecimalField alone only checks digits).
+class _RequiredLocationFields(serializers.Serializer):
+    latitude = serializers.DecimalField(
+        max_digits=9, decimal_places=6, min_value=-90, max_value=90,
+        error_messages={"required": "Location is required to send help — latitude is missing."},
+    )
+    longitude = serializers.DecimalField(
+        max_digits=9, decimal_places=6, min_value=-180, max_value=180,
+        error_messages={"required": "Location is required to send help — longitude is missing."},
+    )
     location_accuracy_metres = serializers.FloatField(required=False, allow_null=True)
+
+
+class SOSTriggerSerializer(_RequiredLocationFields):
     was_offline_queued = serializers.BooleanField(default=False)
     offline_queued_at = serializers.DateTimeField(required=False, allow_null=True)
     priority_level = serializers.ChoiceField(
         choices=["low", "medium", "high", "critical"],
         default="high",
     )
+
+
+class NFCTriggerSerializer(_RequiredLocationFields):
+    # Body of the public POST /nfc/<token>/trigger/ — just the bystander
+    # device's location (no patient/incident fields; see NFCTagTriggerView).
+    pass
 
 
 class ConfirmSOSSerializer(serializers.Serializer):
@@ -250,3 +274,51 @@ class SelectHospitalSerializer(serializers.Serializer):
 class UpdateLocationSerializer(serializers.Serializer):
     ambulance_lat = serializers.FloatField(min_value=-90, max_value=90)
     ambulance_lng = serializers.FloatField(min_value=-180, max_value=180)
+
+
+# NFC Emergency Tags — MERA admin management
+
+class NFCTagAdminSerializer(serializers.ModelSerializer):
+    # Everything a MERA admin needs to manage the physical-inventory
+    # lifecycle: the short code to read/type when pairing a tag they're
+    # holding, the full public URL to note before writing it to a sticker,
+    # and (once paired) which patient it belongs to. Never exposed outside
+    # admin-gated endpoints — this is NOT the public status response.
+    url = serializers.SerializerMethodField()
+    patient_display_name = serializers.SerializerMethodField()
+    patient_email = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NFCTag
+        fields = [
+            "id", "short_code", "token", "url", "status",
+            "patient", "patient_display_name", "patient_email",
+            "paired_at", "voided_at", "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_status(self, obj):
+        # "voided" wins over paired/unpaired — a voided tag is dead
+        # regardless of whether a patient is still recorded on it.
+        if obj.voided_at is not None:
+            return "voided"
+        return "paired" if obj.patient_id is not None else "unpaired"
+
+    def get_url(self, obj):
+        return f"{settings.WEB_FRONTEND_URL}/nfc/{obj.token}"
+
+    def get_patient_display_name(self, obj):
+        return obj.patient.get_display_name() if obj.patient else None
+
+    def get_patient_email(self, obj):
+        return obj.patient.email if obj.patient else None
+
+
+class NFCTagGenerateSerializer(serializers.Serializer):
+    count = serializers.IntegerField(min_value=1, max_value=200)
+
+
+class NFCTagPairSerializer(serializers.Serializer):
+    short_code = serializers.CharField(max_length=8)
+    patient_id = serializers.UUIDField()

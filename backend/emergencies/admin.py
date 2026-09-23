@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import EmergencyLog, Incident, TreatmentNote
+from .models import EmergencyLog, Incident, NFCTag, TreatmentNote
 
 
 class EmergencyLogInline(admin.TabularInline):
@@ -44,3 +44,12 @@ class EmergencyLogAdmin(admin.ModelAdmin):
     search_fields = ["incident__patient__email"]
     readonly_fields = ["id", "logged_at"]
     ordering = ["-logged_at"]
+
+
+@admin.register(NFCTag)
+class NFCTagAdmin(admin.ModelAdmin):
+    list_display = ["short_code", "token", "patient", "paired_at", "created_at"]
+    list_filter = ["paired_at"]
+    search_fields = ["short_code", "token", "patient__email"]
+    readonly_fields = ["id", "token", "short_code", "created_at"]
+    ordering = ["-created_at"]

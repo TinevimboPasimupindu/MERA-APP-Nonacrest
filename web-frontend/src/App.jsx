@@ -8,6 +8,7 @@ import MeraAdminLayout from './layouts/MeraAdminLayout'
 import Login from './pages/auth/Login'
 import TermsAndConditions from './pages/auth/TermsAndConditions'
 import ResetPassword from './pages/auth/ResetPassword'
+import NFCTrigger from './pages/public/NFCTrigger'
 import Dashboard from './pages/hospital-admin/Dashboard'
 import VerificationQueue from './pages/hospital-admin/VerificationQueue'
 import VerificationReview from './pages/hospital-admin/VerificationReview'
@@ -20,6 +21,7 @@ import EmtManagement from './pages/ambulance-admin/EmtManagement'
 import MeraDashboard from './pages/mera-admin/Dashboard'
 import Institutions from './pages/mera-admin/Institutions'
 import Users from './pages/mera-admin/Users'
+import NFCTags from './pages/mera-admin/NFCTags'
 import './App.css'
 
 function App() {
@@ -30,6 +32,7 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/terms-and-conditions" element={<TermsAndConditions />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/nfc/:token" element={<NFCTrigger />} />
 
           <Route
             path="/hospital-admin"
@@ -71,6 +74,7 @@ function App() {
             <Route index element={<MeraDashboard />} />
             <Route path="institutions" element={<Institutions />} />
             <Route path="users" element={<Users />} />
+            <Route path="nfc-tags" element={<NFCTags />} />
           </Route>
 
           <Route path="*" element={<Navigate to="/login" replace />} />

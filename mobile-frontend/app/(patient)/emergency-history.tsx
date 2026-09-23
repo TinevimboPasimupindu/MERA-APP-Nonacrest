@@ -155,7 +155,11 @@ export default function EmergencyHistoryScreen() {
               } else {
                 router.push({
                   pathname: '/(patient)/emergency-active' as any,
-                  params: { incidentId: h.id },
+                  // fromDashboard: history is only reachable dashboard ->
+                  // settings -> history, so a dashboard is beneath; lets
+                  // emergency-active dismissTo() back to it when this incident
+                  // ends instead of replacing itself with a SECOND dashboard.
+                  params: { incidentId: h.id, fromDashboard: '1' },
                 });
               }
             };
