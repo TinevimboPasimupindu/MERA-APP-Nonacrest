@@ -76,7 +76,7 @@ const filtered = allHospitals.filter((h) => {
       Alert.alert(
         'Request Sent!',
         `Your verification request has been sent to ${selectedHospital?.facility_name}. You'll be notified once reviewed.`,
-        [{ text: 'OK', onPress: () => router.push('/(patient)/patient-dashboard' as any) }]
+        [{ text: 'OK', onPress: () => router.navigate('/(patient)/patient-dashboard' as any) }]
       );
     } catch (err: any) {
       console.log('Verification submit error:', JSON.stringify(err));

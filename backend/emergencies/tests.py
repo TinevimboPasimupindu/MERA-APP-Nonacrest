@@ -3,6 +3,7 @@ from decimal import Decimal
 from unittest.mock import Mock, patch
 
 import httpx
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
@@ -11,7 +12,7 @@ from rest_framework.test import APIClient
 from accounts.models import InstitutionalStatus, Role, User
 from emergency_contacts.models import EmergencyContact
 from medical_profiles.models import VerificationStatus
-from .models import Incident, IncidentStatus
+from .models import Incident, IncidentStatus, NFCTag
 from . import services, sms_service
 
 
@@ -133,6 +134,66 @@ class SOSTriggerHTTPTest(TestCase):
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(second.data["id"], first.data["id"])
         self.assertEqual(Incident.objects.filter(patient=patient).count(), 1)
+
+
+class SOSTriggerLocationRequiredHTTPTest(TestCase):
+    # POST /incidents/trigger_sos/ — coordinates are REQUIRED (the mobile app
+    # blocks the trigger client-side until it has a fix; this is the server-
+    # side backstop so a client that skips that check gets a clear 400
+    # instead of an incident nobody can locate).
+
+    def setUp(self):
+        self.client = APIClient()
+        self.patient = make_verified_patient(email="loc-required@test.com")
+        self.client.force_authenticate(user=self.patient)
+
+    def test_missing_both_coordinates_is_rejected_and_creates_nothing(self):
+        response = self.client.post("/api/incidents/trigger_sos/", {"priority_level": "high"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("latitude", response.data)
+        self.assertIn("longitude", response.data)
+        self.assertIn("Location is required", str(response.data["latitude"]))
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_missing_only_longitude_is_rejected(self):
+        response = self.client.post("/api/incidents/trigger_sos/", {"latitude": "-26.2"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("longitude", response.data)
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_explicit_null_coordinates_are_rejected(self):
+        # What the mobile app used to send when permission was denied.
+        response = self.client.post(
+            "/api/incidents/trigger_sos/",
+            {"latitude": None, "longitude": None, "priority_level": "high"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_out_of_range_coordinates_are_rejected(self):
+        response = self.client.post(
+            "/api/incidents/trigger_sos/", {"latitude": "91", "longitude": "28.0"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("latitude", response.data)
+        response = self.client.post(
+            "/api/incidents/trigger_sos/", {"latitude": "-26.2", "longitude": "181"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("longitude", response.data)
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_valid_coordinates_are_stored_on_the_incident(self):
+        response = self.client.post("/api/incidents/trigger_sos/", {
+            "latitude": "-26.204100", "longitude": "28.047300",
+            "location_accuracy_metres": 8.0,
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        incident = Incident.objects.get(patient=self.patient)
+        self.assertEqual(incident.latitude, Decimal("-26.204100"))
+        self.assertEqual(incident.longitude, Decimal("28.047300"))
+        self.assertEqual(incident.location_accuracy_metres, 8.0)
 
 
 class SOSConfirmTest(TestCase):
@@ -1097,3 +1158,513 @@ class MyActiveIncidentTest(TestCase):
         self.client.force_authenticate(user=other_ambulance)
         response = self.client.get("/api/incidents/my_active/")
         self.assertIsNone(response.data["active_incident"])
+
+
+# NFC Emergency Tags
+#
+# New trigger SOURCE for the existing incident pipeline (see
+# PROJECT_CONTEXT.md) — covers admin generation/pairing, the public
+# status/trigger endpoints, and that a successful trigger flows through
+# unchanged to the same emergency-contact SMS a normal SOS uses.
+
+# Coordinates are required on both trigger paths — see
+# serializers._RequiredLocationFields. The bystander device's location for
+# the public NFC endpoint.
+NFC_LOCATION = {"latitude": "-26.204100", "longitude": "28.047300", "location_accuracy_metres": 12.5}
+
+
+def make_mera_admin(email="mera-admin@test.com"):
+    return User.objects.create_user(
+        email=email, password="pass", role=Role.MERA_ADMIN, full_name="MERA Admin",
+    )
+
+
+class NFCTagAdminGenerationTest(TestCase):
+    # POST /api/nfc-tags/generate/ and GET /api/nfc-tags/ — MERA admin only.
+
+    def setUp(self):
+        self.admin = make_mera_admin()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def test_generate_batch_returns_short_codes_and_urls(self):
+        response = self.client.post("/api/nfc-tags/generate/", {"count": 3})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data), 3)
+        short_codes = {row["short_code"] for row in response.data}
+        self.assertEqual(len(short_codes), 3)  # all unique
+        for row in response.data:
+            self.assertIn("/nfc/", row["url"])
+            self.assertIn(row["token"], row["url"])
+            self.assertIsNone(row["patient"])
+            self.assertIsNone(row["paired_at"])
+        self.assertEqual(NFCTag.objects.count(), 3)
+
+    def test_generate_requires_mera_admin(self):
+        non_admin = make_verified_patient(email="not-admin@test.com")
+        self.client.force_authenticate(user=non_admin)
+        response = self.client.post("/api/nfc-tags/generate/", {"count": 2})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(NFCTag.objects.count(), 0)
+
+    def test_generate_rejects_count_out_of_range(self):
+        response = self.client.post("/api/nfc-tags/generate/", {"count": 0})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post("/api/nfc-tags/generate/", {"count": 500})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_returns_all_tags_unfiltered(self):
+        services.generate_nfc_tags(2)
+        patient = make_verified_patient(email="listed-patient@test.com")
+        services.pair_nfc_tag(NFCTag.objects.first().short_code, patient)
+
+        response = self.client.get("/api/nfc-tags/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 2)
+
+    def test_list_filters_by_paired_true(self):
+        services.generate_nfc_tags(2)
+        patient = make_verified_patient(email="filter-paired@test.com")
+        paired_tag = NFCTag.objects.first()
+        services.pair_nfc_tag(paired_tag.short_code, patient)
+
+        response = self.client.get("/api/nfc-tags/?paired=true")
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["id"], str(paired_tag.id))
+        self.assertEqual(response.data[0]["patient_display_name"], "Test Patient")
+        self.assertEqual(response.data[0]["patient_email"], "filter-paired@test.com")
+
+    def test_list_filters_by_paired_false(self):
+        services.generate_nfc_tags(2)
+        patient = make_verified_patient(email="filter-unpaired@test.com")
+        services.pair_nfc_tag(NFCTag.objects.first().short_code, patient)
+
+        response = self.client.get("/api/nfc-tags/?paired=false")
+        self.assertEqual(len(response.data), 1)
+        self.assertIsNone(response.data[0]["patient"])
+
+
+class NFCTagAdminPairingTest(TestCase):
+    # POST /api/nfc-tags/pair/ {short_code, patient_id}
+
+    def setUp(self):
+        self.admin = make_mera_admin(email="pair-admin@test.com")
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+        self.tag = services.generate_nfc_tags(1)[0]
+        self.patient = make_verified_patient(email="pair-target@test.com")
+
+    def test_pairing_sets_patient_and_paired_at(self):
+        response = self.client.post("/api/nfc-tags/pair/", {
+            "short_code": self.tag.short_code, "patient_id": str(self.patient.id),
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.tag.refresh_from_db()
+        self.assertEqual(self.tag.patient_id, self.patient.id)
+        self.assertIsNotNone(self.tag.paired_at)
+
+    def test_pairing_is_case_and_whitespace_insensitive_on_short_code(self):
+        response = self.client.post("/api/nfc-tags/pair/", {
+            "short_code": f"  {self.tag.short_code.lower()}  ", "patient_id": str(self.patient.id),
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_pairing_rejects_already_paired_tag(self):
+        services.pair_nfc_tag(self.tag.short_code, self.patient)
+        other_patient = make_verified_patient(email="pair-other@test.com")
+
+        response = self.client.post("/api/nfc-tags/pair/", {
+            "short_code": self.tag.short_code, "patient_id": str(other_patient.id),
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("already paired", response.data["short_code"])
+        self.tag.refresh_from_db()
+        self.assertEqual(self.tag.patient_id, self.patient.id)  # unchanged
+
+    def test_pairing_rejects_unknown_short_code(self):
+        response = self.client.post("/api/nfc-tags/pair/", {
+            "short_code": "NOTREAL1", "patient_id": str(self.patient.id),
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("No tag found", response.data["short_code"])
+
+    def test_pairing_rejects_unknown_patient_id(self):
+        import uuid
+        response = self.client.post("/api/nfc-tags/pair/", {
+            "short_code": self.tag.short_code, "patient_id": str(uuid.uuid4()),
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Patient not found", response.data["patient_id"])
+
+    def test_pairing_requires_mera_admin(self):
+        non_admin = make_verified_patient(email="pair-non-admin@test.com")
+        self.client.force_authenticate(user=non_admin)
+        response = self.client.post("/api/nfc-tags/pair/", {
+            "short_code": self.tag.short_code, "patient_id": str(self.patient.id),
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class NFCTagPublicStatusTest(TestCase):
+    # GET /api/nfc/<token>/ — fully public, status only, never leaks
+    # patient/incident data.
+
+    def setUp(self):
+        self.client = APIClient()
+        self.patient = make_verified_patient(email="status-patient@test.com")
+
+    def test_invalid_token_returns_invalid(self):
+        response = self.client.get("/api/nfc/not-a-real-token/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, {"status": "invalid"})
+
+    def test_unpaired_tag_returns_unpaired(self):
+        tag = services.generate_nfc_tags(1)[0]
+        response = self.client.get(f"/api/nfc/{tag.token}/")
+        self.assertEqual(response.data, {"status": "unpaired"})
+
+    def test_paired_tag_with_no_incident_returns_paired(self):
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+        response = self.client.get(f"/api/nfc/{tag.token}/")
+        self.assertEqual(response.data, {"status": "paired"})
+
+    def test_paired_tag_with_active_incident_returns_active_incident(self):
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+        Incident.objects.create(patient=self.patient, status=IncidentStatus.ACTIVE)
+
+        response = self.client.get(f"/api/nfc/{tag.token}/")
+        self.assertEqual(response.data, {"status": "active_incident"})
+
+    def test_response_never_contains_patient_or_incident_fields(self):
+        # Belt-and-suspenders on top of the exact-dict assertions above:
+        # confirms the response literally has no other keys at all, not
+        # just that the ones we checked happen to be right.
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+        response = self.client.get(f"/api/nfc/{tag.token}/")
+        self.assertEqual(set(response.data.keys()), {"status"})
+
+    def test_completed_incident_does_not_count_as_active(self):
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+        Incident.objects.create(patient=self.patient, status=IncidentStatus.COMPLETED)
+        response = self.client.get(f"/api/nfc/{tag.token}/")
+        self.assertEqual(response.data, {"status": "paired"})
+
+
+@override_settings(**TWILIO_TEST_SETTINGS)
+class NFCTagPublicTriggerTest(TestCase):
+    # POST /api/nfc/<token>/trigger/ — fully public. Reuses trigger_sos()/
+    # confirm_sos() unchanged, so a successful call must flow through to
+    # the same emergency-contact SMS a normal SOS uses (SOS_ALERT_DELAY_
+    # SECONDS is 0 under `manage.py test`, so that alert runs inline — see
+    # EmergencyContactSMSTest above for the same reasoning).
+
+    def setUp(self):
+        self.client = APIClient()
+        self.patient = make_verified_patient(email="trigger-patient@test.com")
+
+    def test_unpaired_tag_is_rejected(self):
+        tag = services.generate_nfc_tags(1)[0]
+        response = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_invalid_token_returns_404(self):
+        response = self.client.post("/api/nfc/not-a-real-token/trigger/", NFC_LOCATION)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_successful_trigger_creates_and_confirms_incident(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+
+        response = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        self.assertEqual(Incident.objects.filter(patient=self.patient).count(), 1)
+        incident = Incident.objects.get(patient=self.patient)
+        self.assertEqual(incident.status, IncidentStatus.ACTIVE)
+        self.assertEqual(incident.activation_method, "nfc_bystander")
+        self.assertIsNotNone(incident.confirmed_at)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_successful_trigger_response_has_no_patient_or_incident_data(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+
+        response = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(set(response.data.keys()), {"detail"})
+        self.assertNotIn(str(self.patient.id), str(response.data))
+        self.assertNotIn(self.patient.full_name, str(response.data))
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_successful_trigger_notifies_emergency_contacts_same_as_normal_sos(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        contact = make_contact(self.patient, "0821234567", "NFC Contact", 1)
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+
+        response = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        self.assertEqual(sent_to(mock_post), ["+27821234567"])
+        self.assertIn("triggered a medical emergency via MERA", sent_bodies(mock_post)[0])
+        incident = Incident.objects.get(patient=self.patient)
+        self.assertIsNotNone(incident.emergency_contact_alert_sent_at)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_duplicate_active_incident_is_rejected_not_silently_returned(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+
+        first = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(second.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(set(second.data.keys()), {"detail"})
+        # Still exactly one incident — the duplicate attempt created nothing.
+        self.assertEqual(Incident.objects.filter(patient=self.patient).count(), 1)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_duplicate_rejection_also_applies_to_a_manually_triggered_incident(self, mock_post):
+        # The patient already has a non-terminal incident from the normal
+        # (manual) SOS flow — a bystander tapping the same tag moments
+        # later must not create a second one for the same emergency.
+        mock_post.return_value = ok_twilio_response()
+        services.confirm_sos(*services.trigger_sos(self.patient, {}))
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+
+        response = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(Incident.objects.filter(patient=self.patient).count(), 1)
+
+    def test_missing_coordinates_are_rejected_and_create_no_incident(self):
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+
+        response = self.client.post(f"/api/nfc/{tag.token}/trigger/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("latitude", response.data)
+        self.assertIn("longitude", response.data)
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_partial_or_out_of_range_coordinates_are_rejected(self):
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+
+        only_lat = self.client.post(f"/api/nfc/{tag.token}/trigger/", {"latitude": "-26.2"})
+        self.assertEqual(only_lat.status_code, status.HTTP_400_BAD_REQUEST)
+        bad_range = self.client.post(
+            f"/api/nfc/{tag.token}/trigger/", {"latitude": "95", "longitude": "28.0"}
+        )
+        self.assertEqual(bad_range.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_unknown_token_is_404_even_without_coordinates(self):
+        response = self.client.post("/api/nfc/not-a-real-token/trigger/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @patch("emergencies.sms_service.httpx.post")
+    def test_bystander_coordinates_are_stored_and_reach_the_contact_sms(self, mock_post):
+        mock_post.return_value = ok_twilio_response()
+        make_contact(self.patient, "0821234567", "Loc Contact", 1)
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+
+        response = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        incident = Incident.objects.get(patient=self.patient)
+        self.assertEqual(incident.latitude, Decimal("-26.204100"))
+        self.assertEqual(incident.longitude, Decimal("28.047300"))
+        self.assertEqual(incident.location_accuracy_metres, 12.5)
+        self.assertEqual(
+            sent_bodies(mock_post)[0],
+            "Test Patient has triggered a medical emergency via MERA. "
+            "Location: https://www.google.com/maps?q=-26.204100,28.047300",
+        )
+        # And the response still leaks nothing about the patient/incident.
+        self.assertEqual(set(response.data.keys()), {"detail"})
+
+    def test_new_trigger_allowed_after_previous_incident_completed(self):
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+        old, _ = services.trigger_sos(self.patient, {})
+        old.status = IncidentStatus.COMPLETED
+        old.save(update_fields=["status"])
+
+        response = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Incident.objects.filter(patient=self.patient).count(), 2)
+
+
+@override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
+class NFCTagTriggerThrottleTest(TestCase):
+    # NFCTagTriggerThrottle — keyed per-TOKEN, not per-IP (see that class's
+    # own comment for why: a leaked/scanned token URL could otherwise be
+    # replayed indefinitely from many different callers). settings.py
+    # switches CACHES to DummyCache for the rest of the test run so
+    # throttling doesn't interfere with unrelated tests — this class opts
+    # back into a real cache, same convention as
+    # accounts.tests.ThrottlingTest.
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.patient = make_verified_patient(email="throttle-patient@test.com")
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_sixth_request_to_same_token_within_the_hour_is_throttled(self):
+        tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag.short_code, self.patient)
+
+        # nfc_trigger is 5/hour (settings.py). The 1st call succeeds (201);
+        # calls 2-5 hit the duplicate-incident rejection (409) — still real,
+        # non-throttled responses that count against the same bucket.
+        for _ in range(5):
+            response = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+            self.assertNotEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+        sixth = self.client.post(f"/api/nfc/{tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(sixth.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_throttle_is_keyed_per_token_not_globally(self):
+        tag_a = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag_a.short_code, self.patient)
+        other_patient = make_verified_patient(email="throttle-patient-b@test.com")
+        tag_b = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(tag_b.short_code, other_patient)
+
+        for _ in range(5):
+            self.client.post(f"/api/nfc/{tag_a.token}/trigger/", NFC_LOCATION)
+        exhausted = self.client.post(f"/api/nfc/{tag_a.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(exhausted.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # A completely different tag/token must not be affected — proves
+        # this is keyed per-token, not per-IP (the Django test client sends
+        # every request from the same fake IP, so a per-IP throttle would
+        # have caught this one too).
+        still_allowed = self.client.post(f"/api/nfc/{tag_b.token}/trigger/", NFC_LOCATION)
+        self.assertNotEqual(still_allowed.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+class NFCTagUnpairAndVoidTest(TestCase):
+    # POST /api/nfc-tags/{id}/unpair/ and /void/ — MERA admin only.
+
+    def setUp(self):
+        self.admin = make_mera_admin(email="unpair-admin@test.com")
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+        self.patient = make_verified_patient(email="unpair-patient@test.com")
+        self.tag = services.generate_nfc_tags(1)[0]
+        services.pair_nfc_tag(self.tag.short_code, self.patient)
+
+    # unpair
+
+    def test_unpair_detaches_patient_but_keeps_token_valid(self):
+        response = self.client.post(f"/api/nfc-tags/{self.tag.id}/unpair/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "unpaired")
+        self.tag.refresh_from_db()
+        self.assertIsNone(self.tag.patient_id)
+        self.assertIsNone(self.tag.paired_at)
+        # Same token still resolves — now as "not activated yet".
+        public = APIClient().get(f"/api/nfc/{self.tag.token}/")
+        self.assertEqual(public.data, {"status": "unpaired"})
+
+    def test_unpaired_tag_can_be_repaired_to_a_different_patient(self):
+        self.client.post(f"/api/nfc-tags/{self.tag.id}/unpair/")
+        other = make_verified_patient(email="unpair-other@test.com")
+        response = self.client.post("/api/nfc-tags/pair/", {
+            "short_code": self.tag.short_code, "patient_id": str(other.id),
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.tag.refresh_from_db()
+        self.assertEqual(self.tag.patient_id, other.id)
+
+    def test_unpair_rejects_a_tag_that_is_not_paired(self):
+        self.client.post(f"/api/nfc-tags/{self.tag.id}/unpair/")
+        response = self.client.post(f"/api/nfc-tags/{self.tag.id}/unpair/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("isn't paired", str(response.data["detail"]))
+
+    def test_unpair_unknown_tag_is_404(self):
+        import uuid
+        response = self.client.post(f"/api/nfc-tags/{uuid.uuid4()}/unpair/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unpair_and_void_require_mera_admin(self):
+        self.client.force_authenticate(user=self.patient)
+        self.assertEqual(
+            self.client.post(f"/api/nfc-tags/{self.tag.id}/unpair/").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            self.client.post(f"/api/nfc-tags/{self.tag.id}/void/").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.tag.refresh_from_db()
+        self.assertEqual(self.tag.patient_id, self.patient.id)
+        self.assertIsNone(self.tag.voided_at)
+
+    # void
+
+    def test_void_marks_tag_voided_and_keeps_the_row(self):
+        response = self.client.post(f"/api/nfc-tags/{self.tag.id}/void/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "voided")
+        self.tag.refresh_from_db()
+        self.assertIsNotNone(self.tag.voided_at)
+        self.assertTrue(NFCTag.objects.filter(pk=self.tag.pk).exists())  # soft void, not a delete
+
+    def test_voided_token_reads_as_invalid_on_the_public_endpoints(self):
+        self.client.post(f"/api/nfc-tags/{self.tag.id}/void/")
+        public = APIClient()
+        self.assertEqual(public.get(f"/api/nfc/{self.tag.token}/").data, {"status": "invalid"})
+        trigger = public.post(f"/api/nfc/{self.tag.token}/trigger/", NFC_LOCATION)
+        self.assertEqual(trigger.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_voided_tag_cannot_be_paired_or_unpaired_or_voided_again(self):
+        self.client.post(f"/api/nfc-tags/{self.tag.id}/void/")
+        unpair = self.client.post(f"/api/nfc-tags/{self.tag.id}/unpair/")
+        self.assertEqual(unpair.status_code, status.HTTP_400_BAD_REQUEST)
+        again = self.client.post(f"/api/nfc-tags/{self.tag.id}/void/")
+        self.assertEqual(again.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("already voided", str(again.data["detail"]))
+
+        fresh = services.generate_nfc_tags(1)[0]
+        services.void_nfc_tag(fresh)
+        other = make_verified_patient(email="void-other@test.com")
+        pair = self.client.post("/api/nfc-tags/pair/", {
+            "short_code": fresh.short_code, "patient_id": str(other.id),
+        })
+        self.assertEqual(pair.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("voided", str(pair.data["short_code"]))
+
+    def test_list_reports_status_and_filters_voided(self):
+        live_unpaired = services.generate_nfc_tags(1)[0]
+        self.client.post(f"/api/nfc-tags/{self.tag.id}/void/")
+
+        everything = self.client.get("/api/nfc-tags/")
+        by_id = {row["id"]: row["status"] for row in everything.data}
+        self.assertEqual(by_id[str(self.tag.id)], "voided")
+        self.assertEqual(by_id[str(live_unpaired.id)], "unpaired")
+
+        voided_only = self.client.get("/api/nfc-tags/?voided=true")
+        self.assertEqual([r["id"] for r in voided_only.data], [str(self.tag.id)])
+        # A voided tag that still records a patient is NOT listed as paired.
+        paired = self.client.get("/api/nfc-tags/?paired=true")
+        self.assertEqual(len(paired.data), 0)
+        unpaired = self.client.get("/api/nfc-tags/?paired=false")
+        self.assertEqual([r["id"] for r in unpaired.data], [str(live_unpaired.id)])

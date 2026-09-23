@@ -18,6 +18,7 @@ from .models import (
     EmergencyLog,
     Incident,
     IncidentStatus,
+    NFCTag,
     TreatmentNote,
 )
 
@@ -403,6 +404,164 @@ def submit_treatment_notes(incident: Incident, author, data: dict) -> TreatmentN
         if incident.destination_hospital_id:
             _notify("Hospital %s would receive treatment notes update.", incident.destination_hospital_id)
     return note
+
+
+# NFC Emergency Tags
+#
+# New trigger SOURCE for the existing incident pipeline, not a new incident
+# type or a parallel code path — see PROJECT_CONTEXT.md's NFC tags section
+# for the business model (tags manufactured/sold as pre-paired inventory;
+# a MERA admin generates a batch, someone writes each token's URL onto a
+# physical sticker outside this app, an admin later pairs the specific
+# physical tag to a patient when it's sold/issued).
+
+class NFCTagPairingError(Exception):
+    # Raised by pair_nfc_tag() for an admin-facing rejection (unknown short
+    # code, or a tag that's already paired) — str(exc) is the message shown
+    # back to the admin, same convention as trigger_sos's PermissionError.
+    pass
+
+
+class NFCTagUnpairedError(Exception):
+    # Raised by trigger_nfc_sos() when the scanned tag has no patient
+    # linked yet (still unsold inventory).
+    pass
+
+
+class NFCTagDuplicateIncidentError(Exception):
+    # Raised by trigger_nfc_sos() when the tag's paired patient already has
+    # a non-terminal incident. Carries the existing incident purely so a
+    # caller COULD inspect it if it ever needed to — the public trigger
+    # view never exposes it; see that view's own comment for why not.
+    def __init__(self, incident):
+        self.incident = incident
+        super().__init__("An emergency alert is already active for this tag.")
+
+
+def generate_nfc_tags(count: int) -> list[NFCTag]:
+    # Admin-facing batch generation. token/short_code are both produced by
+    # the model field's own default= callables, so a plain one-at-a-time
+    # create() is enough — no need to generate values here too. `count` is
+    # small in practice (an admin ordering a batch of physical stickers to
+    # print/write, not a bulk-data operation), so N individual INSERTs
+    # aren't a real cost, and this reads far more directly than a
+    # bulk_create() (which would need its own uniqueness handling anyway,
+    # since bulk_create() doesn't run per-instance defaults the way
+    # .create() does for a field's callable default — belt and suspenders
+    # either way given token/short_code are both unique=True).
+    return [NFCTag.objects.create() for _ in range(count)]
+
+
+def pair_nfc_tag(short_code: str, patient) -> NFCTag:
+    # Admin action: attach one specific physical tag — identified by the
+    # short code an admin reads off the sticker they're holding, since a
+    # browser-based admin panel can't scan NFC directly — to a patient's
+    # account. Rejects a tag that's already paired (re-pairing would
+    # silently reassign a physical sticker already issued to someone else)
+    # and an unrecognized short code, each with a distinct, clear message.
+    try:
+        tag = NFCTag.objects.get(short_code=short_code.strip().upper())
+    except NFCTag.DoesNotExist:
+        raise NFCTagPairingError("No tag found with that short code.")
+
+    if tag.voided_at is not None:
+        raise NFCTagPairingError("This tag has been voided and can't be paired.")
+
+    if tag.patient_id is not None:
+        raise NFCTagPairingError("This tag is already paired to a patient.")
+
+    tag.patient = patient
+    tag.paired_at = timezone.now()
+    tag.save(update_fields=["patient", "paired_at"])
+    return tag
+
+
+def unpair_nfc_tag(tag: NFCTag) -> NFCTag:
+    # Admin action: detach the tag from its current patient. The token and
+    # short code stay valid, so the SAME physical sticker can later be
+    # paired to someone else (e.g. returned/reissued stock). Distinct from
+    # void_nfc_tag, which kills the token for good.
+    if tag.voided_at is not None:
+        raise NFCTagPairingError("This tag has been voided.")
+    if tag.patient_id is None:
+        raise NFCTagPairingError("This tag isn't paired to a patient.")
+
+    tag.patient = None
+    tag.paired_at = None
+    tag.save(update_fields=["patient", "paired_at"])
+    return tag
+
+
+def void_nfc_tag(tag: NFCTag) -> NFCTag:
+    # Admin action: permanently invalidate the token (lost, damaged or
+    # compromised sticker). Soft-void, not a hard delete — see
+    # NFCTag.voided_at for why. Irreversible by design.
+    if tag.voided_at is not None:
+        raise NFCTagPairingError("This tag is already voided.")
+
+    tag.voided_at = timezone.now()
+    tag.save(update_fields=["voided_at"])
+    return tag
+
+
+def nfc_tag_status(tag: NFCTag) -> str:
+    # One of "invalid" / "unpaired" / "paired" / "active_incident". Backs a
+    # fully public, unauthenticated endpoint (GET /nfc/<token>/), so this
+    # deliberately returns only a bare status string — never the patient,
+    # never any incident detail — see emergencies/views.py::NFCTagStatusView.
+    # A voided tag reports "invalid", indistinguishable from an unknown
+    # token — the public page must not reveal that a token once existed.
+    if tag.voided_at is not None:
+        return "invalid"
+    if tag.patient_id is None:
+        return "unpaired"
+    has_active = (
+        Incident.objects.filter(patient_id=tag.patient_id)
+        .exclude(status__in=_NON_TERMINAL_EXCLUDE)
+        .exists()
+    )
+    return "active_incident" if has_active else "paired"
+
+
+def trigger_nfc_sos(tag: NFCTag, location: dict) -> Incident:
+    # The bystander-facing public trigger. Reuses trigger_sos()/
+    # confirm_sos() UNCHANGED — this is a new trigger source for the
+    # existing incident pipeline, not a parallel one, so every downstream
+    # consequence (emergency-contact SMS, hospital selection, EMT dispatch,
+    # ...) happens exactly as it would for a patient-initiated SOS. The
+    # differences from a normal SOS: the recorded activation_method is
+    # NFC_BYSTANDER instead of MANUAL, and the coordinates are the
+    # BYSTANDER'S device location, sent by the public web page (the patient's
+    # own device isn't necessarily involved — a bystander is scanning a
+    # physical tag on/next to the patient, so their location is the best
+    # available proxy for where the patient is). `location` is the validated
+    # NFCTriggerSerializer payload (latitude/longitude required — the view
+    # rejects a request without them before this is ever called).
+    if tag.voided_at is not None:
+        # Belt and suspenders — the public view already 404s a voided tag
+        # before calling this.
+        raise NFCTagUnpairedError("This tag is not active.")
+    if tag.patient_id is None:
+        raise NFCTagUnpairedError("This tag has not been activated yet.")
+
+    patient = tag.patient
+
+    # trigger_sos() already returns (incident, created=False) instead of
+    # raising when the patient has a non-terminal incident — the right
+    # behaviour for the authenticated patient-facing endpoint, where a
+    # double-tap should transparently hand back the same incident (see
+    # that function's own comment). Here the caller is an anonymous
+    # bystander who already saw an "already alerted" status from
+    # GET .../nfc/<token>/ before ever reaching this endpoint, and the
+    # public trigger response must never carry incident/patient detail
+    # regardless — so created=False is turned into an explicit rejection
+    # here (reusing trigger_sos's own duplicate-prevention query and
+    # result, not a second copy of it) instead of a silent 200.
+    incident, created = trigger_sos(patient, location)
+    if not created:
+        raise NFCTagDuplicateIncidentError(incident)
+
+    return confirm_sos(incident, method=ActivationMethod.NFC_BYSTANDER)
 
 
 def _patient_is_verified(user) -> bool:

@@ -363,6 +363,17 @@ REST_FRAMEWORK = {
         # combined ceiling, matching the shared underlying cost (Cloudinary
         # quota) this is actually bounding — not per-endpoint-type quota.
         "institutional_documents": "20/hour",
+        # NFCTagTriggerView (emergencies/views.py) — the one endpoint in
+        # this app that's fully public/unauthenticated AND can create real
+        # side effects (an Incident, emergency-contact SMS). Keyed per-
+        # TOKEN, not per-IP (see NFCTagTriggerThrottle's own comment) —
+        # a leaked/scanned tag URL could otherwise be replayed
+        # indefinitely from many different callers. 5/hour is generous for
+        # legitimate retries (a bystander's network hiccup) while bounding
+        # how many times any single physical tag can be retriggered.
+        # Accepted as a residual risk at the same tier as the three
+        # documented prototype bypasses — see PROJECT_CONTEXT.md.
+        "nfc_trigger": "5/hour",
     },
 }
 

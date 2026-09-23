@@ -23,6 +23,10 @@ const STATUS_STYLES = {
   withdrawn: { color: COLORS.inkFaint, bg: 'rgba(125,125,147,0.15)', label: 'Withdrawn', live: false },
   active: { color: COLORS.success, bg: COLORS.successSoft, label: 'Active', live: false },
   inactive: { color: COLORS.inkFaint, bg: 'rgba(125,125,147,0.15)', label: 'Inactive', live: false },
+  // NFC tag lifecycle (mera-admin/NFCTags.jsx)
+  paired: { color: COLORS.success, bg: COLORS.successSoft, label: 'Paired', live: false },
+  unpaired: { color: COLORS.amber, bg: COLORS.amberSoft, label: 'Unpaired', live: false },
+  voided: { color: COLORS.red, bg: COLORS.redSoft, label: 'Voided', live: false },
 };
 
 export default function StatusBadge({ status }) {

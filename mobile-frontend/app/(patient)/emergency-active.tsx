@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -17,6 +17,7 @@ import { Colors, FontSizes, Spacing, BorderRadius } from '../../constants/theme'
 import { apiCall, ENDPOINTS } from '../../services/api';
 import { Coordinate, useSmoothCoordinate } from '../../hooks/use-smooth-coordinate';
 import { decodePolyline } from '../../utils/decode-polyline';
+import { newDebugId, debugMount, debugUnmount, debugLog } from '../../utils/debug-instances'; // [DBG]
 
 // Route-call throttling — same reasoning and constants as
 // active-response.tsx's maybeFetchRoute (see PROJECT_CONTEXT.md for the
@@ -61,16 +62,70 @@ type RouteState = {
 };
 
 export default function EmergencyActiveScreen() {
-  const { incidentId } = useLocalSearchParams<{ incidentId: string }>();
+  // fromDashboard: set by patient-dashboard.tsx on the two pushes that open
+  // this screen, meaning a dashboard instance is guaranteed to be BENEATH
+  // this one in the stack (see leaveToDashboard). Absent on the launch/login
+  // session-restore path, where this screen is the stack's only screen.
+  const { incidentId, fromDashboard } = useLocalSearchParams<{
+    incidentId: string;
+    fromDashboard?: string;
+  }>();
   const [incident, setIncident] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [route, setRoute] = useState<RouteState | null>(null);
   const lastRouteCallRef = useRef<{ time: number; origin: Coordinate } | null>(null);
 
-  // Poll for incident updates every 10 seconds
+  // [DBG] identify this instance + log mount/unmount (see utils/debug-instances.ts)
+  const dbgId = useRef(newDebugId()).current;
+  useEffect(() => {
+    debugMount('EmergencyActive', dbgId);
+    return () => debugUnmount('EmergencyActive', dbgId);
+  }, [dbgId]);
+
+  // The ONE way this screen leaves for the dashboard — used by both the
+  // Cancel button and the terminal-status auto-navigation, and guarded so it
+  // can only ever fire once per screen instance.
+  //
+  // Root cause of the runaway-glitch bug (found via the [DBG] logs): the old
+  // code called router.navigate('/(patient)/patient-dashboard') from here.
+  // That does NOT dedupe against the dashboard already beneath this screen
+  // in the Stack, and does not unmount this screen — it mounted a brand NEW
+  // dashboard on top every time. This screen's incident poll then kept
+  // running forever after the incident went terminal, re-detecting
+  // "cancelled" every 10s and navigating AGAIN, each time stacking another
+  // Dashboard (each of which, on its first poll, could push yet another
+  // EmergencyActive). Fix, in three parts: (1) the poll below now stops the
+  // moment it sees a terminal status, (2) this guard, (3) leaving via
+  // dismissTo (React Navigation popTo: pops back to the EXISTING dashboard,
+  // unmounting this screen) instead of navigate. With no dashboard beneath
+  // (session-restore: this screen is the only one) there's nothing to pop to
+  // — dismissTo would push a new dashboard on top and leave this screen
+  // mounted underneath — so that case uses replace instead.
+  const hasLeftRef = useRef(false);
+  const leaveToDashboard = useCallback(
+    (reason: string) => {
+      if (hasLeftRef.current) {
+        debugLog(`EmergencyActive#${dbgId} leave IGNORED (already left) — ${reason}`); // [DBG]
+        return;
+      }
+      hasLeftRef.current = true;
+      if (fromDashboard) {
+        debugLog(`EmergencyActive#${dbgId} LEAVE via dismissTo — ${reason}`); // [DBG]
+        router.dismissTo('/(patient)/patient-dashboard' as any);
+      } else {
+        debugLog(`EmergencyActive#${dbgId} LEAVE via replace (no dashboard beneath) — ${reason}`); // [DBG]
+        router.replace('/(patient)/patient-dashboard' as any);
+      }
+    },
+    [fromDashboard, dbgId]
+  );
+
+  // Poll for incident updates every 10 seconds — until the incident reaches
+  // a terminal state, at which point the poll stops itself immediately.
   useEffect(() => {
     if (!incidentId) return;
     let cancelled = false;
+    let interval: ReturnType<typeof setInterval> | null = null;
 
     async function maybeFetchRoute(ambulancePosition: Coordinate) {
       // GET /incidents/{id}/route/ calls Google's Routes API server-side —
@@ -112,9 +167,16 @@ export default function EmergencyActiveScreen() {
         if (cancelled) return;
         setIncident(data);
 
-        // Navigate away if emergency is completed or cancelled
+        // Terminal state: stop polling RIGHT NOW (this used to keep running
+        // forever after cancellation) and navigate away — exactly once.
         if (data.status === 'completed' || data.status === 'cancelled') {
-          router.replace('/(patient)/patient-dashboard' as any);
+          if (interval) {
+            clearInterval(interval);
+            interval = null;
+          }
+          cancelled = true; // ignore any response still in flight
+          debugLog(`EmergencyActive#${dbgId} status=${data.status} -> poll STOPPED (terminal)`); // [DBG]
+          leaveToDashboard(`terminal status ${data.status}`);
           return;
         }
 
@@ -128,13 +190,15 @@ export default function EmergencyActiveScreen() {
       }
     };
 
+    debugLog(`EmergencyActive#${dbgId} incident poll STARTED for ${incidentId}`); // [DBG]
     fetchIncident();
-    const interval = setInterval(fetchIncident, 10000);
+    interval = setInterval(fetchIncident, 10000);
     return () => {
+      debugLog(`EmergencyActive#${dbgId} incident poll CLEANUP for ${incidentId}`); // [DBG]
       cancelled = true;
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
     };
-  }, [incidentId]);
+  }, [incidentId, leaveToDashboard, dbgId]);
 
   // incident.latitude/longitude are Django DecimalFields, which DRF
   // serializes as strings (e.g. "-26.204100") — parseFloat before handing
@@ -236,7 +300,7 @@ export default function EmergencyActiveScreen() {
                   true
                 );
               }
-              router.replace('/(patient)/patient-dashboard' as any);
+              leaveToDashboard('cancel confirmed');
             } catch (err: any) {
               // Cancellation is allowed through ON_THE_WAY but backend-
               // rejected once ARRIVED_ON_SCENE (see cancellable below —
@@ -326,6 +390,30 @@ export default function EmergencyActiveScreen() {
             <Text style={styles.emergencyTitle}>EMERGENCY{'\n'}ACTIVATED</Text>
           </View>
 
+          {/* NFC bystander banner — styled like a notification, since in a
+              production build this is where a real push notification would
+              have already told the patient the same thing. Driven off the
+              incident's own activation_method (already present in this
+              screen's existing 10s poll response) rather than a nav param,
+              so it's correct however this screen was reached — a fresh
+              auto-navigation from the dashboard poll, session-restore on
+              app relaunch, or manually revisiting this screen — not just
+              the one moment right after the poll first noticed it.
+              Deliberately NFC-only: a patient's own self-triggered SOS
+              (activation_method 'manual'/'auto'/'offline') already tells
+              them how it started, so no banner is shown for those. */}
+          {incident?.activation_method === 'nfc_bystander' && (
+            <View style={styles.nfcBanner}>
+              <Text style={styles.nfcBannerIcon}>🔔</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.nfcBannerTitle}>This emergency was triggered via your NFC tag</Text>
+                <Text style={styles.nfcBannerNote}>
+                  In a production build, this would arrive as a real push notification.
+                </Text>
+              </View>
+            </View>
+          )}
+
           {/* Dispatch Card */}
           <View style={styles.dispatchCard}>
             <Text style={styles.dispatchHeading}>🚑  Ambulance Assigned</Text>
@@ -342,7 +430,13 @@ export default function EmergencyActiveScreen() {
                 ? `Destination: ${incident.destination_hospital_name}`
                 : 'Hospital not yet assigned'}
             </Text>
-            <Text style={styles.dispatchLocation}>📍  Your location has been shared</Text>
+            {/* Only claim the location was shared when the incident really
+                has coordinates — this line used to be unconditional. New
+                incidents always do now (the trigger paths require them);
+                this still matters for older incidents created before that. */}
+            {patientCoordinate && (
+              <Text style={styles.dispatchLocation}>📍  Your location has been shared</Text>
+            )}
           </View>
 
           {/* Map */}
@@ -476,6 +570,34 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
     textAlign: 'center',
     lineHeight: 44,
+  },
+  // Styled like a notification banner (a filled pill with an icon, not
+  // just plain text) — matches how a real push notification would have
+  // looked, since that's what this stands in for on this prototype (see
+  // the note it renders).
+  nfcBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.sm,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.primary,
+    borderRadius: BorderRadius.md,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  nfcBannerIcon: {
+    fontSize: 20,
+  },
+  nfcBannerTitle: {
+    color: Colors.textPrimary,
+    fontSize: FontSizes.sm,
+    fontWeight: '700',
+  },
+  nfcBannerNote: {
+    color: Colors.textSecondary,
+    fontSize: FontSizes.xs,
+    marginTop: 4,
   },
   dispatchCard: {
     backgroundColor: '#200808',

@@ -25,6 +25,8 @@
 # Offline queue: local store then transmit on restore
 # SOS initiates even without connectivity
 
+import secrets
+import string
 import uuid
 from django.db import models
 from django.conf import settings
@@ -53,6 +55,7 @@ class ActivationMethod(models.TextChoices):
     MANUAL = "manual", "Manual (Patient confirmed)"
     AUTO = "auto", "Auto-confirmed (Timer expired)"
     OFFLINE = "offline", "Offline (Queued and transmitted)"
+    NFC_BYSTANDER = "nfc_bystander", "NFC Tag (Bystander triggered)"
 
 # Incident
 
@@ -99,7 +102,9 @@ class Incident(models.Model):
         default=PriorityLevel.HIGH,
     )
     activation_method = models.CharField(
-        max_length=10,
+        # 20, not 10 — "nfc_bystander" (13 chars) doesn't fit the original
+        # width, which only ever needed to hold "manual"/"auto"/"offline".
+        max_length=20,
         choices=ActivationMethod.choices,
         default=ActivationMethod.MANUAL,
     )
@@ -324,3 +329,79 @@ class EmergencyLog(models.Model):
 
     def __str__(self):
         return f"[{self.event_type}] Incident {str(self.incident_id)[:8].upper()} @ {self.logged_at:%Y-%m-%d %H:%M}"
+
+
+# NFC Emergency Tags
+
+# Business model (see PROJECT_CONTEXT.md): tags are manufactured/sold as
+# pre-paired inventory. A MERA admin generates a batch of these in the
+# dashboard, someone writes each token's public URL onto a physical NFC
+# sticker OUTSIDE this app (a free NFC-writing app — not this codebase's
+# concern), and later, when the physical tag is actually sold/issued to a
+# patient, an admin pairs that specific tag to their account.
+#
+# Excludes visually-confusable characters (0/O, 1/I/L) so an admin reading
+# a short code off a physical sticker and typing it into the pairing form
+# doesn't misread it — a token itself is never hand-typed by anyone (it
+# only ever travels as a URL an NFC read fills in automatically), so it
+# doesn't need this same treatment.
+_SHORT_CODE_ALPHABET = "".join(
+    c for c in (string.ascii_uppercase + string.digits) if c not in "0O1IL"
+)
+_SHORT_CODE_LENGTH = 8
+
+
+def _generate_nfc_token() -> str:
+    # The long, unguessable value that goes in the actual public URL
+    # (WEB_FRONTEND_URL/nfc/<token>/). Deliberately the same "long, random,
+    # URL-safe" shape as PasswordResetToken's own token — see
+    # accounts/models.py — since both exist to be unguessable, not typed.
+    return secrets.token_urlsafe(32)
+
+
+def _generate_nfc_short_code() -> str:
+    return "".join(secrets.choice(_SHORT_CODE_ALPHABET) for _ in range(_SHORT_CODE_LENGTH))
+
+
+class NFCTag(models.Model):
+    # One row per physical NFC sticker. `patient` is null for unpaired
+    # inventory (a freshly generated batch, or a tag that was written but
+    # never sold) — pairing just sets `patient`/`paired_at`, nothing about
+    # the token/short_code/URL changes at pairing time.
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    token = models.CharField(max_length=64, unique=True, db_index=True, default=_generate_nfc_token)
+    short_code = models.CharField(max_length=8, unique=True, db_index=True, default=_generate_nfc_short_code)
+
+    patient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="nfc_tags",
+        limit_choices_to={"role": "patient"},
+    )
+    paired_at = models.DateTimeField(null=True, blank=True)
+
+    # Soft-void (a lost, damaged or compromised sticker): set once, never
+    # cleared. A voided tag is permanently dead — the public endpoints treat
+    # it exactly like an unknown token ("invalid"), it can't be paired or
+    # unpaired — but the row is KEPT (rather than hard-deleted) as an audit
+    # trail, and so its token/short_code stay reserved and can never be
+    # regenerated or reused. Same "deactivate, don't delete" reasoning the
+    # admin portal already applies to accounts (is_active), except there's no
+    # restore: a compromised token must not come back. `patient` is left as
+    # it was so the record still shows whose sticker it was.
+    voided_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "NFC Tag"
+        verbose_name_plural = "NFC Tags"
+
+    def __str__(self):
+        who = self.patient.get_display_name() if self.patient else "unpaired"
+        return f"NFC Tag {self.short_code} ({who})"

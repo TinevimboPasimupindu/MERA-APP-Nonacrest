@@ -161,7 +161,12 @@ export default function ChatbotScreen() {
       >
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.push('/(patient)/patient-dashboard')}>
+          {/* dismissTo, not navigate/push: this screen is only ever opened by
+              a push from the dashboard, so a dashboard is already beneath —
+              dismissTo pops back to it (unmounting this screen). navigate
+              does NOT do that here (it mounted a duplicate dashboard; see
+              PROJECT_CONTEXT.md, "dashboard stacking bug"). */}
+          <TouchableOpacity onPress={() => router.dismissTo('/(patient)/patient-dashboard' as any)}>
             <Text style={styles.backText}>←</Text>
           </TouchableOpacity>
           <View style={styles.headerCenter}>
@@ -269,7 +274,7 @@ export default function ChatbotScreen() {
               ]}
               onPress={() => {
                 if (q === 'Activate emergency') {
-                  router.push('/(patient)/patient-dashboard');
+                  router.dismissTo('/(patient)/patient-dashboard' as any); // see note on the back arrow above
                 } else {
                   sendMessage(q);
                 }

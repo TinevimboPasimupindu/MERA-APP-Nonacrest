@@ -41,6 +41,18 @@ export const ENDPOINTS = {
   triggerPasswordReset: (id) => `/auth/admin/users/${id}/trigger-password-reset/`,
   createHospitalAdmin: '/auth/admin/create/hospital-admin/',
   createAmbulanceAdmin: '/auth/admin/create/ambulance-admin/',
+
+  // MERA super-admin — NFC emergency tags
+  nfcTagsGenerate: '/nfc-tags/generate/',
+  nfcTags: '/nfc-tags/',
+  nfcTagsPair: '/nfc-tags/pair/',
+  nfcTagUnpair: (id) => `/nfc-tags/${id}/unpair/`,
+  nfcTagVoid: (id) => `/nfc-tags/${id}/void/`,
+
+  // Public, unauthenticated bystander flow (no auth token sent — see
+  // apiCall's requiresAuth param)
+  nfcTagStatus: (token) => `/nfc/${token}/`,
+  nfcTagTrigger: (token) => `/nfc/${token}/trigger/`,
 };
 
 export const saveToken = (access, refresh) => {

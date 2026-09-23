@@ -5,11 +5,13 @@ from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.views import APIView
 
-from accounts.models import HOSPITAL_ROLES
-from accounts.permissions import IsHospital, IsPatient
+from accounts.models import HOSPITAL_ROLES, Role, User
+from accounts.permissions import IsHospital, IsMERAAdmin, IsPatient
 
-from .models import Incident, IncidentStatus, TreatmentNote
+from .models import Incident, IncidentStatus, NFCTag, TreatmentNote
 from .permissions import (
     AMBULANCE_RESPONDER_ROLES,
     IsAcceptingAmbulance,
@@ -26,6 +28,10 @@ from .serializers import (
     IncidentAmbulanceBroadcastSerializer,
     IncidentHospitalIncomingSerializer,
     IncidentPatientSerializer,
+    NFCTagAdminSerializer,
+    NFCTagGenerateSerializer,
+    NFCTagPairSerializer,
+    NFCTriggerSerializer,
     SOSTriggerSerializer,
     SelectHospitalSerializer,
     TreatmentNoteSerializer,
@@ -450,3 +456,205 @@ class IncidentViewSet(viewsets.GenericViewSet):
         except Incident.DoesNotExist:
             from rest_framework.exceptions import NotFound
             raise NotFound("Incident not found.")
+
+
+# NFC Emergency Tags — MERA admin management
+#
+# See PROJECT_CONTEXT.md's NFC tags section for the business model:
+# tags are manufactured/sold as pre-paired inventory. A MERA admin
+# generates a batch here, someone writes each token's URL onto a physical
+# NFC sticker OUTSIDE this app, and later — when a tag is actually sold/
+# issued to a patient — an admin pairs that specific tag via its short
+# code (read off the physical sticker; a browser-based admin panel can't
+# scan NFC directly).
+
+class NFCTagGenerateView(APIView):
+    # POST /nfc-tags/generate/ — batch-create N unpaired tags. Returns
+    # their short codes + full URLs so the admin can note/print them
+    # before writing them to physical stickers.
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def post(self, request):
+        serializer = NFCTagGenerateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        tags = services.generate_nfc_tags(serializer.validated_data["count"])
+        return Response(
+            NFCTagAdminSerializer(tags, many=True).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class NFCTagListView(APIView):
+    # GET /nfc-tags/?paired=true|false | ?voided=true — every tag,
+    # optionally filtered. Unfiltered by default (paired, unpaired AND
+    # voided). paired=true/false only match LIVE tags (voided ones are
+    # excluded — a voided tag is neither usable-and-paired nor inventory);
+    # voided=true lists just the voided ones.
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def get(self, request):
+        tags = NFCTag.objects.select_related("patient").all()
+        paired = request.query_params.get("paired")
+        voided = request.query_params.get("voided")
+        if voided is not None and voided.lower() in ("true", "1"):
+            tags = tags.filter(voided_at__isnull=False)
+        elif paired is not None:
+            if paired.lower() in ("true", "1"):
+                tags = tags.filter(patient__isnull=False, voided_at__isnull=True)
+            elif paired.lower() in ("false", "0"):
+                tags = tags.filter(patient__isnull=True, voided_at__isnull=True)
+        return Response(NFCTagAdminSerializer(tags, many=True).data)
+
+
+class _NFCTagActionView(APIView):
+    # Shared shape for the per-tag admin actions below: look the tag up by
+    # id (404 if unknown), run one service function, map its
+    # NFCTagPairingError to a clear 400, return the updated tag.
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+    service_action = None  # set by subclasses
+
+    def post(self, request, tag_id):
+        try:
+            tag = NFCTag.objects.select_related("patient").get(pk=tag_id)
+        except NFCTag.DoesNotExist:
+            return Response({"detail": "Tag not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            tag = type(self).service_action(tag)
+        except services.NFCTagPairingError as exc:
+            raise ValidationError({"detail": str(exc)})
+        return Response(NFCTagAdminSerializer(tag).data)
+
+
+class NFCTagUnpairView(_NFCTagActionView):
+    # POST /nfc-tags/{id}/unpair/ — detach from the current patient; the
+    # token stays valid so the sticker can be re-paired to someone else.
+    service_action = staticmethod(services.unpair_nfc_tag)
+
+
+class NFCTagVoidView(_NFCTagActionView):
+    # POST /nfc-tags/{id}/void/ — permanently invalidate the token (soft
+    # void, kept for audit; see NFCTag.voided_at).
+    service_action = staticmethod(services.void_nfc_tag)
+
+
+class NFCTagPairView(APIView):
+    # POST /nfc-tags/pair/ {short_code, patient_id} — attach a specific
+    # physical tag to a patient's account. Rejects an already-paired tag
+    # or an unrecognized short code (services.pair_nfc_tag distinguishes
+    # the two with separate messages).
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def post(self, request):
+        serializer = NFCTagPairSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            patient = User.objects.get(
+                pk=serializer.validated_data["patient_id"], role=Role.PATIENT
+            )
+        except User.DoesNotExist:
+            raise ValidationError({"patient_id": "Patient not found."})
+
+        try:
+            tag = services.pair_nfc_tag(serializer.validated_data["short_code"], patient)
+        except services.NFCTagPairingError as exc:
+            raise ValidationError({"short_code": str(exc)})
+
+        return Response(NFCTagAdminSerializer(tag).data)
+
+
+# NFC Emergency Tags — public, unauthenticated bystander flow
+#
+# Both views below are deliberately outside IncidentViewSet: every action
+# on that viewset defaults to IsAuthenticated (see its class-level
+# permission_classes), and these two are the one place in this app that
+# must work for a bystander with no MERA account at all — the whole point
+# of a physical tag is that whoever taps it never logs in.
+
+class NFCTagTriggerThrottle(ScopedRateThrottle):
+    # A leaked/scanned token URL could otherwise be replayed indefinitely
+    # — DRF's ScopedRateThrottle keys an anonymous caller by IP by default
+    # (self.get_ident), which doesn't bound a single token being replayed
+    # from many different IPs/devices. Keyed on the token itself instead
+    # (already a long, unguessable value — see NFCTag.token), so the SAME
+    # physical tag can only be retriggered a handful of times per window
+    # regardless of caller IP. Documented as an accepted residual risk in
+    # PROJECT_CONTEXT.md, same tier as the three existing prototype
+    # bypasses — not hardened further than this for this prototype's scope
+    # (no captcha, no device fingerprinting, no per-IP+token combination).
+    scope = "nfc_trigger"
+
+    def get_cache_key(self, request, view):
+        token = view.kwargs.get("token", "")
+        return self.cache_format % {"scope": self.scope, "ident": token}
+
+
+class NFCTagStatusView(APIView):
+    # GET /nfc/<token>/ — fully public. Returns the tag's current state
+    # only: "invalid" (no such token), "unpaired" (not activated yet),
+    # "paired" (activated, no active incident), or "active_incident"
+    # (already alerted). Never the patient's name or any medical/incident
+    # detail — status only, by design (see PROJECT_CONTEXT.md).
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def get(self, request, token):
+        try:
+            tag = NFCTag.objects.get(token=token)
+        except NFCTag.DoesNotExist:
+            return Response({"status": "invalid"})
+        return Response({"status": services.nfc_tag_status(tag)})
+
+
+class NFCTagTriggerView(APIView):
+    # POST /nfc/<token>/trigger/ — fully public. Creates and confirms an
+    # Incident for the tag's paired patient via the SAME trigger_sos()/
+    # confirm_sos() functions the authenticated mobile SOS button uses —
+    # this is a new trigger SOURCE for the existing incident pipeline, not
+    # a parallel one, so every downstream consequence (emergency-contact
+    # SMS, hospital selection, EMT dispatch, ...) is unchanged. Rejects an
+    # unpaired tag and a patient who already has a non-terminal incident —
+    # see services.trigger_nfc_sos for how that reuses trigger_sos's own
+    # duplicate-prevention logic rather than a second copy of it.
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = [NFCTagTriggerThrottle]
+    # ScopedRateThrottle.allow_request() reads view.throttle_scope (not the
+    # throttle class's own `scope` attribute) to decide the rate AND to set
+    # self.scope before get_cache_key() runs — without this, allow_request
+    # short-circuits to "not throttled" for every request (it checks
+    # hasattr(view, "throttle_scope") first). Same convention as
+    # TriggerPasswordResetView's throttle_scope elsewhere in this codebase.
+    throttle_scope = "nfc_trigger"
+
+    def post(self, request, token):
+        try:
+            tag = NFCTag.objects.get(token=token, voided_at__isnull=True)
+        except NFCTag.DoesNotExist:
+            # A voided tag is indistinguishable from an unknown one.
+            return Response({"detail": "Invalid or unknown tag."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Location is required (see _RequiredLocationFields) — validated
+        # AFTER the tag lookup so an unknown token is still a 404 rather
+        # than a misleading "missing location" 400, and BEFORE the service
+        # so a request without coordinates can never create an incident.
+        serializer = NFCTriggerSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            services.trigger_nfc_sos(tag, serializer.validated_data)
+        except services.NFCTagUnpairedError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except services.NFCTagDuplicateIncidentError as exc:
+            # Never echoes the existing incident's id/data back to an
+            # anonymous caller — same "status only, no patient/incident
+            # detail" rule the GET status endpoint follows. A bystander
+            # who reaches this branch already saw "active_incident" from
+            # GET .../nfc/<token>/ before tapping confirm.
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+
+        # Deliberately does NOT return the created Incident's data — same
+        # "no patient-identifying info in any response" rule the whole
+        # public NFC flow follows (see PROJECT_CONTEXT.md). The web
+        # frontend's confirm page only ever needs to know it succeeded.
+        return Response({"detail": "Help has been alerted."}, status=status.HTTP_201_CREATED)
