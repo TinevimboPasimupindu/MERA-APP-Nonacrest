@@ -136,6 +136,14 @@ export const apiCall = async (endpoint, method = 'GET', body = null, requiresAut
   }
 
   const text = await response.text();
+
+  // Empty body (e.g. DRF destroy() → 204 No Content) is a valid response,
+  // not a parse failure — JSON.parse('') would throw and look like an error.
+  if (!text) {
+    if (!response.ok) throw { status: response.status, detail: `Server error ${response.status}` };
+    return null;
+  }
+
   let data;
   try {
     data = JSON.parse(text);
