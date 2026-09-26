@@ -137,12 +137,14 @@ export default function ChatbotScreen() {
       };
 
       setMessages((prev) => [...prev, botMsg]);
-    } catch (err) {
+    } catch (err: any) {
       console.log('Chatbot message failed:', err);
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        text: "Sorry, I'm having trouble responding right now. Please try again shortly.",
+        // e.g. no connection, AI service down, or session expired — each
+        // with its own next step (see apiCall / chatbot/views.py).
+        text: err?.detail || "Your message wasn't answered. Send it again in a moment.",
       };
       setMessages((prev) => [...prev, errorMsg]);
     } finally {

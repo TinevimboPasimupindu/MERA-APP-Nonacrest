@@ -72,6 +72,23 @@ export default function PatientDashboardScreen() {
 
   const firstName = user?.full_name?.trim().split(/\s+/)[0] || 'there';
 
+  // A hospital waiting on the patient (more info requested / visit
+  // required) is otherwise only visible inside Medical Profile. Refetched
+  // on focus so it clears as soon as they respond and come back here.
+  // Purely informational — never gates SOS.
+  const [verificationRequest, setVerificationRequest] = useState<any>(null);
+  useFocusEffect(useCallback(() => {
+    apiCall(ENDPOINTS.verificationMyStatus, 'GET', undefined, true)
+      .then(setVerificationRequest)
+      .catch((err) => console.log('Error fetching verification status:', err));
+  }, []));
+  const hospitalAction =
+    verificationRequest?.status === 'info_requested'
+      ? `${verificationRequest.hospital_name || 'Your hospital'} needs more information from you`
+      : verificationRequest?.status === 'flagged'
+      ? `${verificationRequest.hospital_name || 'Your hospital'} needs to see you in person`
+      : null;
+
   // Ask for location permission as soon as the dashboard loads, so the OS
   // prompt is out of the way BEFORE an emergency rather than appearing in
   // the middle of one (previously it was only ever requested inside
@@ -307,7 +324,7 @@ export default function PatientDashboardScreen() {
         <View style={styles.headerRight}>
           <View style={styles.safeBadge}>
             <View style={styles.safeDot} />
-            <Text style={styles.safeBadgeText}>Safe</Text>
+            <Text style={styles.safeBadgeText}>Live</Text>
           </View>
 
           <TouchableOpacity
@@ -329,6 +346,17 @@ export default function PatientDashboardScreen() {
           ever rendered on this screen, never on any emergency-flow
           screen. */}
       <HouseAdsBanner />
+
+      {hospitalAction && (
+        <TouchableOpacity
+          style={styles.hospitalBanner}
+          onPress={() => router.push('/(patient)/medical-profile' as any)}
+        >
+          <Ionicons name="alert-circle-outline" size={20} color={Colors.warning} />
+          <Text style={styles.hospitalBannerText}>{hospitalAction}</Text>
+          <Text style={styles.hospitalBannerLink}>View</Text>
+        </TouchableOpacity>
+      )}
 
       {/* BODY */}
       <View style={styles.body}>
@@ -449,6 +477,21 @@ export default function PatientDashboardScreen() {
 }
 
 const styles = StyleSheet.create({
+  hospitalBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    marginHorizontal: Spacing.md,
+    marginTop: Spacing.sm,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    backgroundColor: '#2A1F05',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#4A3A10',
+  },
+  hospitalBannerText: { flex: 1, color: Colors.textPrimary, fontSize: FontSizes.sm },
+  hospitalBannerLink: { color: Colors.warning, fontSize: FontSizes.sm, fontWeight: '700' },
   safe: {
     flex: 1,
     backgroundColor: Colors.background,

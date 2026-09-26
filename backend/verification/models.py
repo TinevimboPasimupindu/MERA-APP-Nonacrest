@@ -42,6 +42,14 @@ class VerificationRequest(models.Model):
         help_text="Note shown to patient when flagged or more info requested.",
     )
 
+    # The patient's reply to a "request more info" — whatever they want the
+    # hospital to know that doesn't fit a profile field. Set together with
+    # patient_responded_at when they resubmit (services.record_patient_edit)
+    # and cleared when the hospital asks something new, so a re-review
+    # always shows the answer to the question currently in hospital_note.
+    patient_response = models.TextField(blank=True, default="")
+    patient_responded_at = models.DateTimeField(null=True, blank=True)
+
     # Timestamps for SLA tracking (urgency badges for overdue reviews)
     submitted_at = models.DateTimeField(default=timezone.now)
     reviewed_at = models.DateTimeField(null=True, blank=True)

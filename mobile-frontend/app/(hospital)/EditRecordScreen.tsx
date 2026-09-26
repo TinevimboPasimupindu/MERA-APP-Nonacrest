@@ -78,7 +78,6 @@ export default function EditRecordScreen(): React.JSX.Element {
       if (!requestId) return;
       try {
         const data = await apiCall(`/verification/${requestId}/review/`, 'GET', undefined, true);
-        console.log('Profile data:', JSON.stringify(data));
         setProfile(data);
         setConditions(data.chronic_conditions || '');
         setAllergies(data.known_allergies || '');

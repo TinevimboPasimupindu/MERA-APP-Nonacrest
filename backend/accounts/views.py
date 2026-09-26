@@ -49,6 +49,7 @@ from .serializers import (
     HospitalAdminCreationSerializer,
     HospitalRegistrationSerializer,
     InstitutionalDocumentSerializer,
+    InstitutionDocumentsUpdateSerializer,
     InstitutionSummarySerializer,
     PatientRegistrationSerializer,
     PasswordResetConfirmSerializer,
@@ -91,6 +92,23 @@ class OTPDeliveryError(Exception):
     """Raised when an OTP code was generated but could not be emailed."""
 
 
+def _otp_email_text(user: User, code: str) -> str:
+    # Same code/mechanism for both; only the wording differs. An account
+    # still awaiting its first verification is mid-registration.
+    if not user.email_verified:
+        return (
+            f"Welcome to MERA. Your code to confirm your email and finish creating "
+            f"your account is {code}.\n\n"
+            f"This code expires in {OTP_VALIDITY_MINUTES} minutes. "
+            "If you didn't sign up for MERA, you can ignore this email."
+        )
+    return (
+        f"Your MERA login verification code is {code}.\n\n"
+        f"This code expires in {OTP_VALIDITY_MINUTES} minutes. "
+        "If you didn't try to log in, you can ignore this email."
+    )
+
+
 def _send_otp_email(user: User, code: str) -> None:
     # Brevo's transactional email HTTP API (plain HTTPS, port 443 — not
     # blocked on Render's free tier the way SMTP ports are). Uses `requests`
@@ -111,11 +129,7 @@ def _send_otp_email(user: User, code: str) -> None:
                 "sender": {"email": settings.BREVO_SENDER_EMAIL},
                 "to": [{"email": user.email}],
                 "subject": "Your MERA verification code",
-                "textContent": (
-                    f"Your MERA login verification code is {code}.\n\n"
-                    f"This code expires in {OTP_VALIDITY_MINUTES} minutes. "
-                    "If you didn't try to log in, you can ignore this email."
-                ),
+                "textContent": _otp_email_text(user, code),
             },
             timeout=BREVO_TIMEOUT_SECONDS,
         )
@@ -279,7 +293,7 @@ def _otp_required_response(user: User) -> Response:
         # don't tell them to "wait a few minutes" as if a rate limit were
         # the problem when Brevo itself is the one that failed.
         return Response(
-            {"detail": "Could not send verification code. Please try again shortly."},
+            {"detail": "We couldn't email your verification code — the email service didn't respond. Wait a minute, then try again."},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     if not sent:
@@ -334,13 +348,26 @@ class PatientRegisterView(APIView):
         serializer = PatientRegistrationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-        return Response(
-            {
-                "message": "Registration successful. Please complete your medical intake form.",
-                **_token_response(user),
-            },
-            status=status.HTTP_201_CREATED,
-        )
+
+        # No tokens until the emailed code is confirmed (VerifyOTPView) —
+        # same OTP mechanism as login. The account exists either way, so a
+        # failed send isn't a failed registration: the client goes to the
+        # code screen regardless and can Resend from there. If they never
+        # finish, logging in later runs the same OTP step and completes it.
+        body = {
+            "otp_required": True,
+            "user_id": str(user.id),
+            "detail": "Account created. Enter the 6-digit code we emailed you to finish registering.",
+        }
+        try:
+            _generate_and_send_otp(user)
+        except OTPDeliveryError:
+            body["otp_delivery_failed"] = True
+            body["detail"] = (
+                "Account created, but we couldn't email your verification code. "
+                "Tap Resend on the next screen to try again."
+            )
+        return Response(body, status=status.HTTP_201_CREATED)
 
 # Google Sign-In — patients only (see PROJECT_CONTEXT.md, "Key principle:
 # only Patients self-register"; this is an alternative to email/password
@@ -381,6 +408,12 @@ class GoogleSignInView(APIView):
                     {"detail": "This account has been deactivated. Contact your administrator."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+            # GoogleSignInSerializer already required email_verified from
+            # Google, which proves the inbox as well as our own OTP would —
+            # completes a registration left unverified on the email path.
+            if not user.email_verified:
+                user.email_verified = True
+                user.save(update_fields=["email_verified"])
             return Response(_token_response(user), status=status.HTTP_200_OK)
 
         # No existing account — create one, but only with real consent.
@@ -588,7 +621,13 @@ class VerifyOTPView(APIView):
         serializer = VerifyOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
-        return Response(_token_response(user), status=status.HTTP_200_OK)
+        return Response(
+            {
+                **_token_response(user),
+                "registration_completed": serializer.validated_data["registration_completed"],
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class ResendOTPView(APIView):
@@ -883,6 +922,35 @@ class InstitutionsListView(APIView):
         ).order_by("-date_joined")
         institutions = _search_filter(institutions, request.query_params.get("search", ""))
         return Response(InstitutionSummarySerializer(institutions, many=True).data)
+
+
+class InstitutionDocumentsView(APIView):
+    # PATCH /auth/admin/institutions/{id}/documents/ (multipart) — MERA
+    # admin uploads or replaces a hospital/ambulance's onboarding documents.
+    # Used for renewals/expired documents and to backfill institutions
+    # created before documents were required. See
+    # InstitutionDocumentsUpdateSerializer.
+    permission_classes = [permissions.IsAuthenticated, IsMERAAdmin]
+
+    def patch(self, request, user_id):
+        from rest_framework.exceptions import NotFound
+
+        try:
+            institution = User.objects.get(id=user_id, role__in=(HOSPITAL_ROLES | AMBULANCE_ROLES))
+        except User.DoesNotExist:
+            raise NotFound("Institution not found.")
+
+        serializer = InstitutionDocumentsUpdateSerializer(institution, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.save()
+        except Exception:  # noqa: BLE001 — any Cloudinary/network failure means nothing was saved
+            logger.exception("Institution document upload failed for %s", institution.id)
+            return Response(
+                {"detail": "The document storage service couldn't accept the upload, so nothing was changed. Try again in a moment."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(InstitutionSummarySerializer(institution).data)
 
 # MERA Admin: basic platform stats
 

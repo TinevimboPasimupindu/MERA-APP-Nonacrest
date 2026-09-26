@@ -83,7 +83,7 @@ export default function AmbulanceRegisterStep3() {
       console.log('Registration error:', JSON.stringify(err));
       Alert.alert(
         'Registration Failed',
-        err.detail || JSON.stringify(err) || 'Could not submit registration. Please try again.',
+        err.detail || 'Could not submit registration. Check your details and try again.',
         [{ text: 'OK' }]
       );
     } finally {

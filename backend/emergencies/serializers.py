@@ -151,21 +151,32 @@ class IncidentAmbulanceActiveSerializer(serializers.ModelSerializer):
 
     def get_medical_summary(self, obj):
         # Pull verified medical profile fields for the ambulance responder.
-        # Returns None if profile is not verified (should not happen in practice).
+        # SOS works for unverified patients too (see
+        # services._patient_may_trigger_sos), so an
+        # unverified profile is expected here. Its medical details are
+        # withheld server-side, never sent, since no hospital has vouched for
+        # them — the responder gets the name and profile_verified: False.
 
         try:
             profile = obj.patient.medical_profile
-            return {
-                "full_name": obj.patient.get_full_name(),
-                "blood_type": profile.blood_type,
-                "chronic_conditions": profile.chronic_conditions,
-                "current_medications": profile.current_medications,
-                "known_allergies": profile.known_allergies,
-                "paramedic_notes": profile.paramedic_notes,
-                "verification_status": profile.verification_status,
-            }
         except Exception:  # noqa: BLE001
             return None
+
+        summary = {
+            "full_name": obj.patient.get_full_name(),
+            "profile_verified": profile.is_verified,
+        }
+        if not profile.is_verified:
+            return summary
+        return {
+            **summary,
+            "blood_type": profile.blood_type,
+            "chronic_conditions": profile.chronic_conditions,
+            "current_medications": profile.current_medications,
+            "known_allergies": profile.known_allergies,
+            "paramedic_notes": profile.paramedic_notes,
+            "verification_status": profile.verification_status,
+        }
 
 # Incident — Hospital incoming patient panel
 

@@ -13,6 +13,10 @@ from .serializers import ChatbotMessageSerializer, ChatbotHistorySerializer
 client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
 MODEL = "claude-sonnet-5"
+CHATBOT_UNAVAILABLE = (
+    "The AI assistant couldn't be reached just now, so your message wasn't answered. "
+    "Wait a moment and send it again. For anything urgent, use the SOS button or call 10177."
+)
 HISTORY_LIMIT = 7
 
 
@@ -92,7 +96,12 @@ def chatbot_message(request):
     except Exception as e:
         print("CHATBOT API ERROR:", repr(e))
         return Response(
-            {"error": "The chatbot is currently unavailable. Please try again shortly."},
+            # "detail" is what the app's error handling reads; "error" is
+            # kept for any existing caller.
+            {
+                "error": CHATBOT_UNAVAILABLE,
+                "detail": CHATBOT_UNAVAILABLE,
+            },
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 

@@ -23,6 +23,7 @@ class UserAdmin(BaseUserAdmin):
         "id", "date_joined", "locked_at",
         "institutional_status_updated_at",
         "failed_login_attempts",
+        "id_number",
     ]
     inlines = [InstitutionalDocumentInline]
 
@@ -32,7 +33,9 @@ class UserAdmin(BaseUserAdmin):
         ("Institutional", {"fields": (
             "institutional_status", "institutional_status_updated_at", "institutional_rejection_reason",
         )}),
-        ("Patient Fields", {"fields": ("full_name", "phone_number")}),
+        # id_number: read-only here (the only place it's visible at all) —
+        # it's an audit record of what the patient registered with.
+        ("Patient Fields", {"fields": ("full_name", "phone_number", "id_number")}),
         ("Hospital Fields", {"fields": (
             "facility_name", "facility_type", "facility_registration_number",
             "admin_contact_name", "admin_phone", "official_address", "province",

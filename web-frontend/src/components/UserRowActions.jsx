@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { apiCall, ENDPOINTS } from '../services/api';
+import { firstFieldError, formFormatError } from '../utils/validation';
 import { useAuth } from '../context/AuthContext';
 
 // Dark theme + accent colors — self-contained, same approach used across
@@ -40,6 +41,25 @@ function editFieldsForRole(role) {
   ];
 }
 
+// Institutional onboarding documents per institution type — upload field
+// names match InstitutionDocumentsUpdateSerializer (and the creation
+// serializers), urlField is where the current copy lives on the row.
+function documentFieldsForRole(role) {
+  if (HOSPITAL_ROLE_SET.has(role)) {
+    return [
+      { name: 'health_facility_certificate', label: 'Health Facility Certificate', urlField: 'health_facility_certificate_url' },
+      { name: 'cipc_registration_document', label: 'CIPC Registration Document', urlField: 'cipc_registration_url' },
+    ];
+  }
+  if (AMBULANCE_ROLE_SET.has(role)) {
+    return [
+      { name: 'ems_operating_license', label: 'EMS Operating License', urlField: 'ems_operating_license_url' },
+      { name: 'hpcsa_doh_registration_document', label: 'HPCSA/DoH Registration Document', urlField: 'hpcsa_doh_registration_url' },
+    ];
+  }
+  return [];
+}
+
 // PATCH /auth/admin/users/{id}/ — full_name/email/phone_number/
 // facility_name/service_name only (role and password are not editable
 // here). Prefilled straight from the row data passed in, which must
@@ -48,19 +68,46 @@ function editFieldsForRole(role) {
 // that matters for safety.
 function EditUserModal({ user, onClose, onSaved }) {
   const fields = editFieldsForRole(user.role);
+  const documentFields = documentFieldsForRole(user.role);
   const [form, setForm] = useState(Object.fromEntries(fields.map((f) => [f.name, user[f.name] ?? ''])));
+  // Chosen replacement/backfill files, keyed by upload field name.
+  const [files, setFiles] = useState({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
   const submit = async (e) => {
     e.preventDefault();
     setError(null);
+    const formatError = formFormatError(form, fields);
+    if (formatError) {
+      setError(formatError);
+      return;
+    }
     setBusy(true);
     try {
-      const updated = await apiCall(ENDPOINTS.editUser(user.id), 'PATCH', form);
+      let updated = await apiCall(ENDPOINTS.editUser(user.id), 'PATCH', form);
+      const chosen = documentFields.filter((d) => files[d.name]);
+      if (chosen.length) {
+        // Separate multipart request (apiCall sends FormData as-is). If
+        // this part fails the details above are already saved, so the
+        // error says so rather than implying nothing changed.
+        const payload = new FormData();
+        chosen.forEach((d) => payload.append(d.name, files[d.name]));
+        try {
+          updated = { ...updated, ...(await apiCall(ENDPOINTS.institutionDocuments(user.id), 'PATCH', payload)) };
+        } catch (docErr) {
+          onSaved(updated, { keepOpen: true });
+          setError(
+            `Details saved, but the documents weren't uploaded: ${
+              firstFieldError(docErr, documentFields) || docErr.detail || 'the upload failed.'
+            } Choose the files again and save to retry.`
+          );
+          return;
+        }
+      }
       onSaved(updated);
     } catch (err) {
-      setError(err.detail || err.email?.[0] || 'Could not save changes. Check the fields and try again.');
+      setError(firstFieldError(err, fields) || err.detail || 'Could not save changes. Check the fields and try again.');
     } finally {
       setBusy(false);
     }
@@ -88,6 +135,35 @@ function EditUserModal({ user, onClose, onSaved }) {
             />
           </div>
         ))}
+
+        {documentFields.length > 0 && (
+          <div style={{ margin: '6px 0 16px' }}>
+            <div style={{ ...labelStyle, fontSize: 12.5, color: COLORS.ink }}>Onboarding documents</div>
+            <p style={{ fontSize: 11.5, color: COLORS.inkMuted, margin: '0 0 10px' }}>
+              Upload a document to add one that&apos;s missing, or to replace an expired copy. Leave blank to keep what&apos;s on file.
+            </p>
+            {documentFields.map((d) => (
+              <div key={d.name} style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>
+                  {d.label} —{' '}
+                  {user[d.urlField] ? (
+                    <a href={user[d.urlField]} target="_blank" rel="noopener noreferrer" style={{ color: COLORS.accent }}>
+                      view current
+                    </a>
+                  ) : (
+                    <span style={{ color: COLORS.red }}>not on file</span>
+                  )}
+                </label>
+                <input
+                  type="file"
+                  accept=".pdf,image/*"
+                  onChange={(e) => setFiles((s) => ({ ...s, [d.name]: e.target.files[0] || null }))}
+                  style={{ ...inputStyle, padding: '8px 10px' }}
+                />
+              </div>
+            ))}
+          </div>
+        )}
 
         {error && <p style={{ color: COLORS.red, fontSize: 12.5, margin: '0 0 12px' }}>{error}</p>}
 
@@ -240,7 +316,10 @@ export default function UserRowActions({ user, onChanged }) {
         <EditUserModal
           user={user}
           onClose={() => setEditing(false)}
-          onSaved={(updated) => { onChanged(updated); setEditing(false); }}
+          onSaved={(updated, opts) => {
+            onChanged(updated);
+            if (!opts?.keepOpen) setEditing(false);
+          }}
         />
       )}
     </>

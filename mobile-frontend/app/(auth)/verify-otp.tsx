@@ -1,6 +1,6 @@
 import { View, Text, StyleSheet, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { useState } from 'react';
-import { useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_700Bold } from '@expo-google-fonts/inter';
 import { useFonts as useLibreFonts, LibreBaskerville_700Bold } from '@expo-google-fonts/libre-baskerville';
 
@@ -17,12 +17,23 @@ import { routeAfterAuth } from '../../utils/route-after-auth';
 // on this screen is patient-specific — verify/resend both just pass
 // user_id/code through, and routeAfterAuth (below) already branches on
 // the real role from the token response, same as it always did.
+//
+// Also the last step of patient registration (register.tsx, purpose=
+// 'registration'): the account has no tokens until this code is confirmed.
+// `notice` carries the backend's message when the registration email
+// couldn't be sent, so the patient knows to tap Resend.
 export default function VerifyOtpScreen() {
-  const { userId, email } = useLocalSearchParams<{ userId: string; email?: string }>();
+  const { userId, email, purpose, notice } = useLocalSearchParams<{
+    userId: string;
+    email?: string;
+    purpose?: string;
+    notice?: string;
+  }>();
+  const isRegistration = purpose === 'registration';
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(notice || '');
   const [resendMessage, setResendMessage] = useState('');
 
   const [fontsLoaded] = useFonts({
@@ -52,8 +63,14 @@ export default function VerifyOtpScreen() {
         code,
       });
       await saveToken(data.access, data.refresh);
-      // Same routing decision normal login always made — an OTP step in
-      // between doesn't change where a patient or EMT lands afterward.
+      // A just-completed registration (straight from register.tsx, or an
+      // abandoned one finished later via login) continues to the medical
+      // intake form, as registration always did. Otherwise, same routing
+      // decision normal login always made.
+      if (data.registration_completed && data.user.role === 'patient') {
+        router.replace('/(patient)/medical-intake' as any);
+        return;
+      }
       await routeAfterAuth(data.user.role);
     } catch (err: any) {
       setError(err.detail || 'Invalid or expired code. Please try again.');
@@ -100,11 +117,14 @@ export default function VerifyOtpScreen() {
             <View style={styles.line} />
           </View>
 
-          <Text style={styles.welcomeHeading}>Check Your Email</Text>
+          <Text style={styles.welcomeHeading}>
+            {isRegistration ? 'Confirm Your Email' : 'Check Your Email'}
+          </Text>
           <Text style={styles.welcomeSubtitle}>
             {email
               ? `We sent a 6-digit verification code to ${email}.`
               : 'We sent a 6-digit verification code to your email.'}
+            {isRegistration ? ' Enter it to finish creating your account.' : ''}
           </Text>
 
           {error ? (

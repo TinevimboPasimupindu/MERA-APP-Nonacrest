@@ -464,21 +464,38 @@ export default function ActiveResponse() {
               <Text style={styles.patientEmoji}>🚨</Text>
               <Text style={styles.patientLabel}>PATIENT</Text>
             </View>
-            <Text style={styles.patientName}>
-              {medical?.full_name || 'Unknown Patient'} • {medical?.blood_type || '—'}
-            </Text>
-            <Text style={styles.patientConditions}>
-              {medical?.chronic_conditions || 'No conditions listed'}
-            </Text>
-            {medical?.known_allergies ? (
-              <Text style={styles.allergyText}>⚠️ Allergic to {medical.known_allergies}</Text>
-            ) : null}
-            {medical?.current_medications ? (
-              <Text style={styles.medicationText}>💊 {medical.current_medications}</Text>
-            ) : null}
-            {medical?.paramedic_notes ? (
-              <Text style={styles.notesText}>📋 {medical.paramedic_notes}</Text>
-            ) : null}
+            {/* Server withholds medical details for unverified profiles and
+                sends profile_verified: false — see get_medical_summary. */}
+            {medical?.profile_verified === false ? (
+              <>
+                <Text style={styles.patientName}>
+                  {medical.full_name || 'Unknown Patient'}
+                </Text>
+                <Text style={styles.allergyText}>⚠️ Profile not verified</Text>
+                <Text style={styles.notesText}>
+                  This patient's medical profile hasn't been verified by a hospital yet, so
+                  their medical details aren't shown. Assess and treat without them.
+                </Text>
+              </>
+            ) : (
+              <>
+                <Text style={styles.patientName}>
+                  {medical?.full_name || 'Unknown Patient'} • {medical?.blood_type || '—'}
+                </Text>
+                <Text style={styles.patientConditions}>
+                  {medical?.chronic_conditions || 'No conditions listed'}
+                </Text>
+                {medical?.known_allergies ? (
+                  <Text style={styles.allergyText}>⚠️ Allergic to {medical.known_allergies}</Text>
+                ) : null}
+                {medical?.current_medications ? (
+                  <Text style={styles.medicationText}>💊 {medical.current_medications}</Text>
+                ) : null}
+                {medical?.paramedic_notes ? (
+                  <Text style={styles.notesText}>📋 {medical.paramedic_notes}</Text>
+                ) : null}
+              </>
+            )}
           </View>
         )}
 

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -8,9 +8,11 @@ import {
   SafeAreaView,
   StatusBar,
   Linking,
+  ActivityIndicator,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Colors, FontSizes, Spacing, BorderRadius } from '../../constants/theme';
+import { apiCall, ENDPOINTS } from '../../services/api';
 
 const BRING_ITEMS = [
   'South African ID / Passport',
@@ -19,9 +21,57 @@ const BRING_ITEMS = [
 ];
 
 export default function VisitRequiredScreen() {
+  const [loading, setLoading] = useState(true);
+  const [request, setRequest] = useState<any>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        setRequest(await apiCall(ENDPOINTS.verificationMyStatus, 'GET', undefined, true));
+      } catch (err: any) {
+        setError(err.detail || 'Could not load your verification status.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchStatus();
+  }, []);
+
   const openMaps = () => {
-    Linking.openURL('https://maps.google.com/?q=Charlotte+Maxeke+Hospital+Johannesburg');
+    const query = [request?.hospital_name, request?.hospital_address].filter(Boolean).join(', ');
+    Linking.openURL(`https://maps.google.com/?q=${encodeURIComponent(query)}`);
   };
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.centered}>
+          <ActivityIndicator color={Colors.primary} size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // Only a flagged request has a visit to show — anything else (error,
+  // no request, or the flag was since resolved) gets a plain message.
+  if (error || request?.status !== 'flagged') {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.centered}>
+          <Text style={styles.statusTitle}>
+            {error ? "Couldn't load your visit details" : 'No visit required'}
+          </Text>
+          <Text style={styles.statusText}>
+            {error || "Your hospital hasn't asked you to come in for an in-person visit."}
+          </Text>
+          <TouchableOpacity style={[styles.secondaryBtn, styles.backBtn]} onPress={() => router.back()}>
+            <Text style={styles.secondaryBtnText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -48,19 +98,23 @@ export default function VisitRequiredScreen() {
         </View>
 
         {/* Clinician note */}
-        <View style={styles.noteCard}>
-          <Text style={styles.noteLabel}>📋  Hospital's Note</Text>
-          <Text style={styles.noteText}>
-            "The conditions listed could not be cross-referenced with existing records. Please bring supporting documents (prescriptions, medical history)."
-          </Text>
-        </View>
+        {request.hospital_note ? (
+          <View style={styles.noteCard}>
+            <Text style={styles.noteLabel}>📋  Hospital's Note</Text>
+            <Text style={styles.noteText}>"{request.hospital_note}"</Text>
+          </View>
+        ) : null}
 
         {/* Hospital details */}
         <View style={styles.hospitalCard}>
           <Text style={styles.hospitalTitle}>🏥  Visit This Hospital</Text>
-          <Text style={styles.hospitalName}>Charlotte Maxeke Academic Hospital</Text>
-          <Text style={styles.hospitalAddress}>Jubilee Road, Parktown, Johannesburg</Text>
-          <Text style={styles.hospitalHours}>Mon–Fri  7:00–16:00  |  Walk-in accepted</Text>
+          <Text style={styles.hospitalName}>{request.hospital_name}</Text>
+          {request.hospital_address ? (
+            <Text style={styles.hospitalAddress}>{request.hospital_address}</Text>
+          ) : null}
+          {request.hospital_visiting_hours ? (
+            <Text style={styles.hospitalHours}>{request.hospital_visiting_hours}</Text>
+          ) : null}
           <TouchableOpacity style={styles.directionsBtn} onPress={openMaps}>
             <Text style={styles.directionsBtnText}>📍  Get Directions</Text>
           </TouchableOpacity>
@@ -77,14 +131,14 @@ export default function VisitRequiredScreen() {
         {/* Action buttons */}
         <TouchableOpacity
           style={styles.primaryBtn}
-          onPress={() => router.push('/(auth)/medical-intake')}
+          onPress={() => router.push('/(patient)/medical-intake' as any)}
         >
           <Text style={styles.primaryBtnText}>Re-submit After Visit</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
           style={styles.secondaryBtn}
-          onPress={() => router.push('/(auth)/hospital-selection')}
+          onPress={() => router.push('/(patient)/hospital-selection' as any)}
         >
           <Text style={styles.secondaryBtnText}>Choose a Different Hospital</Text>
         </TouchableOpacity>
@@ -97,6 +151,8 @@ export default function VisitRequiredScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.lg },
+  backBtn: { marginTop: Spacing.lg, alignSelf: 'stretch' },
   scroll: { flex: 1, paddingHorizontal: Spacing.md },
   header: {
     flexDirection: 'row',

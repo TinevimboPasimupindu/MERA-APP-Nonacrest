@@ -169,7 +169,7 @@ export default function RegistrationSuccess({ navigation }: Props): React.JSX.El
   };
 
   const handleSupport = (): void => {
-    Linking.openURL('mailto:support@mera.co.za');
+    Linking.openURL('mailto:mera.supportstaff@gmail.com');
   };
 
   return (
@@ -233,7 +233,7 @@ export default function RegistrationSuccess({ navigation }: Props): React.JSX.El
         <TouchableOpacity onPress={handleSupport} activeOpacity={0.7}>
           <Text style={styles.supportText}>
             Need help?{'  '}
-            <Text style={styles.supportLink}>Contact support@mera.co.za</Text>
+            <Text style={styles.supportLink}>Contact mera.supportstaff@gmail.com</Text>
           </Text>
         </TouchableOpacity>
 

@@ -77,6 +77,9 @@ export default function NFCTrigger() {
   const [locationReason, setLocationReason] = useState('unavailable');
   const coordsRef = useRef(null);
   const [errorMessage, setErrorMessage] = useState('');
+  // The error view covers both a failed tag check and a failed alert —
+  // the title must say which, since only the latter means help wasn't sent.
+  const [errorTitle, setErrorTitle] = useState('');
   const [triggering, setTriggering] = useState(false);
   const [pressed, setPressed] = useState(false);
 
@@ -107,7 +110,12 @@ export default function NFCTrigger() {
         if (status === 'paired') acquireLocation();
         else setView(status);
       })
-      .catch(() => setView('error'));
+      .catch((err) => {
+        // Usually no connection — apiCall's detail says so specifically.
+        setErrorTitle("Couldn't check this tag");
+        setErrorMessage(`${err.detail || "Couldn't check this tag."} If someone needs urgent help right now, call your local emergency number.`);
+        setView('error');
+      });
   };
 
   useEffect(() => {
@@ -157,10 +165,12 @@ export default function NFCTrigger() {
       } else if (err.status === 400) {
         setView('unpaired');
       } else if (err.status === 429) {
+        setErrorTitle("The alert couldn't be sent");
         setErrorMessage('This tag has been used too many times in a short period. Please wait a few minutes and try again, or call your local emergency number directly.');
         setView('error');
       } else {
-        setErrorMessage('Could not send the alert. Please try again, or call your local emergency number directly.');
+        setErrorTitle("The alert couldn't be sent");
+        setErrorMessage(`The alert was NOT sent: ${err.detail || 'the server did not accept it.'} Try again, or call your local emergency number directly.`);
         setView('error');
       }
     } finally {
@@ -279,6 +289,9 @@ export default function NFCTrigger() {
                 onTouchStart={startHold}
                 onTouchEnd={endHold}
                 onTouchCancel={endHold}
+                // Android Chrome opens a context menu on long-press, which
+                // would also steal the touch mid-hold.
+                onContextMenu={(e) => e.preventDefault()}
                 style={{
                   ...holdBtnStyle,
                   transform: pressed ? 'scale(0.93)' : 'scale(1)',
@@ -309,8 +322,8 @@ export default function NFCTrigger() {
 
         {view === 'error' && (
           <>
-            <p style={titleText}>Something went wrong</p>
-            <p style={mutedText}>{errorMessage || 'Please try again.'}</p>
+            <p style={titleText}>{errorTitle || "The alert couldn't be sent"}</p>
+            <p style={mutedText}>{errorMessage || 'Try again, or call your local emergency number directly.'}</p>
             <button type="button" onClick={loadStatus} style={retryBtnStyle}>Try again</button>
           </>
         )}
@@ -354,7 +367,16 @@ const statusPill = {
   marginBottom: 16,
 };
 const helpList = { color: COLORS.inkMuted, fontSize: 12.5, lineHeight: 1.6, textAlign: 'left', margin: '8px 0 0', paddingLeft: 18 };
-const holdWrapStyle = { display: 'flex', justifyContent: 'center', padding: '8px 0' };
+const holdWrapStyle = {
+  display: 'flex',
+  justifyContent: 'center',
+  padding: '8px 0',
+  // A thumb that drifts slightly off the button mid-hold would otherwise
+  // start selecting the surrounding text instead.
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
+  WebkitTouchCallout: 'none',
+};
 const holdBtnStyle = {
   width: 150,
   height: 150,
@@ -367,7 +389,14 @@ const holdBtnStyle = {
   alignItems: 'center',
   justifyContent: 'center',
   cursor: 'pointer',
+  // A press-and-hold is exactly the gesture mobile browsers use to start a
+  // text selection / show the long-press callout, which highlighted the
+  // label mid-hold. React doesn't vendor-prefix inline styles, so iOS
+  // Safari needs the -webkit- forms spelled out explicitly.
   userSelect: 'none',
+  WebkitUserSelect: 'none',
+  WebkitTouchCallout: 'none',
+  WebkitTapHighlightColor: 'transparent',
   touchAction: 'none',
   transition: 'transform 120ms ease',
   boxShadow: '0 0 0 8px rgba(153,23,23,0.18)',

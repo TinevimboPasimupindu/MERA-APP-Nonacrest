@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiCall, ENDPOINTS } from '../../services/api';
+import { formFormatError } from '../../utils/validation';
 import StatusBadge from '../../components/StatusBadge';
 import UserRowActions from '../../components/UserRowActions';
 
@@ -154,6 +155,11 @@ function CreateInstitutionModal({ title, fields, documentFields, endpoint, roleG
       setError('Passwords do not match.');
       return;
     }
+    const formatError = formFormatError(form, fields);
+    if (formatError) {
+      setError(formatError);
+      return;
+    }
     if (reassign && !successorOf) {
       setError('Select which deactivated institution this account is taking over.');
       return;
@@ -177,9 +183,11 @@ function CreateInstitutionModal({ title, fields, documentFields, endpoint, roleG
       await apiCall(endpoint, 'POST', payload);
       onCreated();
     } catch (err) {
-      const fieldError = [...fields, ...documentFields].map((f) => err[f.name]?.[0]).find(Boolean);
+      const fieldError = [...fields, ...documentFields]
+        .map((f) => (err[f.name]?.[0] ? `${f.label}: ${err[f.name][0]}` : null))
+        .find(Boolean);
       setError(
-        err.detail || err.successor_of?.[0] || fieldError ||
+        fieldError || err.successor_of?.[0] || err.detail ||
         'Could not create that account. Check the fields and try again.'
       );
     } finally {

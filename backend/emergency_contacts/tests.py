@@ -75,3 +75,37 @@ class EmergencyContactCRUDTest(TestCase):
         )
         response = self.client.get(self.list_url)
         self.assertEqual(len(response.data["results"]), 0)
+
+
+class EmergencyContactPhoneValidationTest(TestCase):
+    # Stored numbers must be something Twilio can actually text when an SOS
+    # fires — see normalize_contact_phone.
+
+    def setUp(self):
+        self.user = make_patient("phone-v@test.com")
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.url = reverse("emergency-contact-list")
+
+    def _create(self, phone):
+        return self.client.post(self.url, {
+            "full_name": "Contact", "relationship": "friend",
+            "phone_number": phone, "priority_order": 1,
+        })
+
+    def test_local_sa_number_with_spaces_normalized(self):
+        response = self._create("082 123 4567")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["phone_number"], "+27821234567")
+
+    def test_international_number_accepted(self):
+        response = self._create("+44 20 7946 0958")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["phone_number"], "+442079460958")
+
+    def test_malformed_numbers_rejected(self):
+        for raw in ["12345", "0921234567", "+27 82 123", "+0123456789", "call me"]:
+            with self.subTest(raw=raw):
+                response = self._create(raw)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("phone_number", response.data)

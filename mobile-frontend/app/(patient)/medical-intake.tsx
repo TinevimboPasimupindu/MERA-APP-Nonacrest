@@ -107,7 +107,7 @@ export default function MedicalIntakeScreen() {
           <View style={styles.banner}>
             <Text style={styles.bannerIcon}>ℹ️</Text>
             <Text style={styles.bannerText}>
-              Your info will be verified by a hospital before you can use emergency features.
+              A hospital you choose will review this information. You can use SOS and all emergency features straight away — review doesn't hold anything up.
             </Text>
           </View>
 

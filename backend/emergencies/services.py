@@ -152,11 +152,9 @@ def trigger_sos(patient_user, validated_data: dict) -> tuple[Incident, bool]:
     # the same emergency would be a real correctness bug regardless of
     # intent: two ambulances could get dispatched to the same patient, and
     # emergency contacts would be notified twice for one event. Checked
-    # BEFORE the verification gate below on purpose — a patient who
-    # already has a live incident should get it back regardless of
-    # whether their profile is *currently* verified (verification status
-    # could theoretically change between the first trigger and a retry;
-    # that shouldn't orphan them from their own already-triggered incident).
+    # BEFORE the eligibility gate below on purpose — a patient who already
+    # has a live incident should always get it back, whatever that gate
+    # says at retry time.
     existing = (
         Incident.objects.filter(patient=patient_user)
         .exclude(status__in=_NON_TERMINAL_EXCLUDE)
@@ -166,8 +164,8 @@ def trigger_sos(patient_user, validated_data: dict) -> tuple[Incident, bool]:
     if existing:
         return existing, False
 
-    if not _patient_is_verified(patient_user):
-        raise PermissionError("SOS is locked until your medical profile is verified.")
+    if not _patient_may_trigger_sos(patient_user):
+        raise PermissionError("SOS is not available for this account.")
 
     with transaction.atomic():
         incident = Incident.objects.create(
@@ -564,5 +562,14 @@ def trigger_nfc_sos(tag: NFCTag, location: dict) -> Incident:
     return confirm_sos(incident, method=ActivationMethod.NFC_BYSTANDER)
 
 
-def _patient_is_verified(user) -> bool:
+def _patient_may_trigger_sos(user) -> bool:
+    # Deliberately always True — a design decision, not a prototype shortcut.
+    # SOS and ambulance dispatch are independent of hospital verification
+    # status: an ambulance must never be delayed or withheld because a
+    # patient's paperwork is unfinished, flagged, or awaiting re-review after
+    # an edit. Verification only controls what the responder is shown —
+    # unverified profiles have their medical details withheld (see
+    # IncidentAmbulanceActiveSerializer.get_medical_summary).
+    # MedicalProfile.sos_unlocked is therefore NOT an SOS gate; don't wire it
+    # in here without revisiting that decision.
     return True
