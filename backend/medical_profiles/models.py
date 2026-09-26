@@ -116,14 +116,18 @@ class MedicalProfile(models.Model):
     # Business logic helpers 
 
     def submit_by_patient(self) -> None:
-    # Auto-verified for prototype — skipping hospital verification flow.
-        self.verification_status = VerificationStatus.VERIFIED
-        self.verified_at = timezone.now()
+        # Any patient edit resets to Pending — including edits to an already
+        # Verified profile. A hospital's verified badge must never survive an
+        # unreviewed change to the underlying medical data. verified_at /
+        # verified_by are left as a record of the last real hospital approval.
+        # Callers should go through verification.services.record_patient_edit()
+        # so the patient's VerificationRequest is reopened in step with this.
+        self.verification_status = VerificationStatus.PENDING
         self.last_updated_by = self.patient
         self.last_updated_at = timezone.now()
         self.save(update_fields=[
-        "verification_status", "verified_at", "last_updated_by", "last_updated_at", "updated_at",
-    ])
+            "verification_status", "last_updated_by", "last_updated_at", "updated_at",
+        ])
 
     def update_by_hospital(self, hospital_user) -> None:
         # Hospital edits do NOT reset verification status.
@@ -181,5 +185,7 @@ class MedicalProfile(models.Model):
 
     @property
     def sos_unlocked(self) -> bool:
-        # FR-25: SOS button only available to verified patients with active consent.
+        # Informational only: verified AND consenting. Originally FR-25's SOS
+        # gate, but SOS is deliberately NOT gated on verification — see
+        # emergencies.services._patient_may_trigger_sos.
         return self.is_verified and self.data_sharing_consent

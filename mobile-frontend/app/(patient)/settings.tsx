@@ -9,17 +9,25 @@ import {
   StatusBar,
   Modal,
   Alert,
+  Linking,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Colors, FontSizes, Spacing, BorderRadius } from '../../constants/theme';
 import { apiCall, ENDPOINTS, clearTokens, getToken } from '../../services/api';
+import { getVerificationBadge } from '../../utils/verification-badge';
 
 type ThemeOption = 'dark' | 'light' | 'system';
+
+// MERA's monitored support inbox — also the backend's OTP/password-reset
+// sender (BREVO_SENDER_EMAIL, set via environment, not in this repo).
+const SUPPORT_EMAIL = 'mera.supportstaff@gmail.com';
 
 export default function SettingsScreen() {
   const [theme, setTheme] = useState<ThemeOption>('dark');
   const [showThemePicker, setShowThemePicker] = useState(false);
   const [user, setUser] = useState<any>(null);
+  const [profile, setProfile] = useState<any>(null);
+  const [verificationRequest, setVerificationRequest] = useState<any>(null);
 
   const themeLabel = theme === 'dark' ? 'Dark' : theme === 'light' ? 'Light' : 'System';
 
@@ -32,8 +40,75 @@ export default function SettingsScreen() {
         console.log('Error fetching user:', err);
       }
     };
+    // Same two sources medical-profile.tsx builds its badge from, fetched
+    // separately so one failing never blanks the other.
+    const fetchProfile = async () => {
+      try {
+        setProfile(await apiCall(ENDPOINTS.medicalProfileMe, 'GET', undefined, true));
+      } catch (err) {
+        console.log('Error fetching profile:', err);
+      }
+    };
+    const fetchVerificationStatus = async () => {
+      try {
+        setVerificationRequest(
+          await apiCall(ENDPOINTS.verificationMyStatus, 'GET', undefined, true)
+        );
+      } catch (err) {
+        console.log('Error fetching verification status:', err);
+      }
+    };
     fetchUser();
+    fetchProfile();
+    fetchVerificationStatus();
   }, []);
+
+  // Hidden until at least one source has loaded, so a failed fetch never
+  // shows a misleading status.
+  const badge =
+    profile || verificationRequest
+      ? getVerificationBadge(verificationRequest, profile)
+      : null;
+
+  // Same self-service reset as the login screen's "Forgot password?"
+  // (forgot-password.tsx): POST /auth/password-reset/ emails a link to the
+  // web reset page. The endpoint always returns the same generic response,
+  // so there's nothing more specific to report here either way.
+  const handleChangePassword = () => {
+    if (!user?.email) {
+      Alert.alert('Change Password', 'Could not load your account details. Check your connection and try again.');
+      return;
+    }
+    Alert.alert(
+      'Change Password',
+      `We'll email a password reset link to ${user.email}.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Send Link',
+          onPress: async () => {
+            try {
+              await apiCall(ENDPOINTS.passwordReset, 'POST', { email: user.email });
+            } catch {
+              // Deliberately ignored — see forgot-password.tsx.
+            }
+            Alert.alert(
+              'Check Your Email',
+              'A password reset link has been sent. Open it on this phone and set a new password.'
+            );
+          },
+        },
+      ]
+    );
+  };
+
+  const handleContactSupport = async () => {
+    try {
+      await Linking.openURL(`mailto:${SUPPORT_EMAIL}`);
+    } catch {
+      Alert.alert('Contact Support', `No email app is set up on this device. You can reach us at ${SUPPORT_EMAIL}.`);
+    }
+  };
 
   const getInitials = (name: string) => {
     if (!name) return 'ME';
@@ -111,7 +186,10 @@ export default function SettingsScreen() {
         </View>
 
         {/* Profile card */}
-        <TouchableOpacity style={styles.profileCard}>
+        <TouchableOpacity
+          style={styles.profileCard}
+          onPress={() => router.push('/(patient)/medical-profile' as any)}
+        >
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>
               {getInitials(user?.display_name || 'ME')}
@@ -124,9 +202,13 @@ export default function SettingsScreen() {
             <Text style={styles.profileSub}>
               {user?.role === 'patient' ? 'Patient' : user?.role || 'User'}
             </Text>
-            <View style={styles.verifiedBadge}>
-              <Text style={styles.verifiedText}>✓  Verified</Text>
-            </View>
+            {badge && (
+              <View style={[styles.verifiedBadge, { backgroundColor: badge.bg }]}>
+                <Text style={[styles.verifiedText, { color: badge.color }]}>
+                  {badge.label}
+                </Text>
+              </View>
+            )}
           </View>
           <Text style={styles.chevron}>›</Text>
         </TouchableOpacity>
@@ -148,9 +230,7 @@ export default function SettingsScreen() {
 
         {/* Account */}
         <Text style={styles.sectionLabel}>ACCOUNT</Text>
-        <SettingsRow icon="👤" iconBg="#0D1230" label="Edit Profile" onPress={() => {}} />
-        <SettingsRow icon="🔒" iconBg="#0D1230" label="Change Password" onPress={() => {}} />
-        <SettingsRow icon="🔔" iconBg="#0D1230" label="Notification Preferences" onPress={() => {}} />
+        <SettingsRow icon="🔒" iconBg="#0D1230" label="Change Password" onPress={handleChangePassword} />
 
         {/* My Health */}
         <Text style={styles.sectionLabel}>MY HEALTH</Text>
@@ -164,7 +244,6 @@ export default function SettingsScreen() {
 
         {/* Support & Legal */}
         <Text style={styles.sectionLabel}>SUPPORT & LEGAL</Text>
-        <SettingsRow icon="❓" iconBg="#12121E" label="FAQs" sub="Frequently asked questions" onPress={() => {}} />
         <SettingsRow
           icon="📜"
           iconBg="#12121E"
@@ -183,7 +262,7 @@ export default function SettingsScreen() {
           sub="How MERA handles your data"
           onPress={() => router.push('/(auth)/terms-and-conditions' as any)}
         />
-        <SettingsRow icon="💬" iconBg="#12121E" label="Contact Support" sub="Get help from the MERA team" onPress={() => {}} />
+        <SettingsRow icon="💬" iconBg="#12121E" label="Contact Support" sub="Get help from the MERA team" onPress={handleContactSupport} />
 
         {/* Log out */}
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>

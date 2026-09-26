@@ -20,8 +20,9 @@ import {
 } from '@expo-google-fonts/inter';
 
 import { Colors, Spacing } from '../../constants/theme';
-import { apiCall, ENDPOINTS, saveToken } from '../../services/api';
+import { apiCall, ENDPOINTS } from '../../services/api';
 import { useGoogleSignIn } from '../../hooks/use-google-signin';
+import { emailError, idOrPassportError, saPhoneError } from '../../utils/validation';
 
 export default function RegisterScreen() {
   const router = useRouter();
@@ -58,6 +59,17 @@ export default function RegisterScreen() {
       return;
     }
 
+    // Format checks — the backend enforces the same email/phone/ID rules.
+    // The ID/passport number is optional, but validated if entered.
+    const formatError =
+      emailError(email) ||
+      saPhoneError(phone) ||
+      (idNumber.trim() ? idOrPassportError(idNumber) : null);
+    if (formatError) {
+      setError(formatError);
+      return;
+    }
+
     if (password !== confirmPassword) {
       setError('Passwords do not match.');
       return;
@@ -81,33 +93,40 @@ export default function RegisterScreen() {
     // document covering general terms AND POPIA/data-handling matters
     // together (see PROJECT_CONTEXT.md), so agreeing to it genuinely
     // covers both backend consent records, not just one of them.
-    console.log('Sending registration data:', JSON.stringify({
-      full_name: fullName,
-      email,
-      phone_number: phone,
-      password,
-      confirm_password: confirmPassword,
-      popi_consent: agreedToTerms,
-      terms_consent: agreedToTerms,
-    }));
-
     try {
       const data = await apiCall(ENDPOINTS.registerPatient, 'POST', {
         full_name: fullName,
         email,
         phone_number: phone,
+        // Stored for identity verification/audit; never shown back in
+        // the app. Same normalization the backend applies.
+        id_number: idNumber.replace(/\s/g, '').toUpperCase(),
         password,
         confirm_password: confirmPassword,
         popi_consent: agreedToTerms,
         terms_consent: agreedToTerms,
       });
 
-      await saveToken(data.access, data.refresh);
-      router.replace('/(patient)/medical-intake' as any);
+      // No tokens yet — the account only becomes usable once the emailed
+      // code is confirmed. verify-otp.tsx then saves the tokens and, since
+      // the response says registration_completed, continues to intake.
+      // replace, not push, so Back can't resubmit this form for an email
+      // that's now taken.
+      router.replace({
+        pathname: '/(auth)/verify-otp' as any,
+        params: {
+          userId: data.user_id,
+          email: email.trim(),
+          purpose: 'registration',
+          notice: data.otp_delivery_failed ? data.detail : '',
+        },
+      });
 
     } catch (err: any) {
       console.log('Registration error:', JSON.stringify(err));
-      setError(JSON.stringify(err) || 'Registration failed. Please try again.');
+      // apiCall turns field errors into a readable detail, e.g.
+      // "Email: An account with this email already exists."
+      setError(err.detail || 'Registration failed. Check your details and try again.');
     } finally {
       setLoading(false);
     }
@@ -187,6 +206,8 @@ export default function RegisterScreen() {
             placeholderTextColor={Colors.textSecondary}
             value={idNumber}
             onChangeText={setIdNumber}
+            autoCapitalize="characters"
+            autoCorrect={false}
           />
         </View>
 

@@ -17,6 +17,7 @@ import {
 import { router } from 'expo-router';
 import { Colors, FontSizes, Spacing, BorderRadius } from '../../constants/theme';
 import { apiCall, ENDPOINTS } from '../../services/api';
+import { getVerificationBadge } from '../../utils/verification-badge';
 
 const BLOOD_TYPES = ['A+', 'A−', 'B+', 'B−', 'AB+', 'AB−', 'O+', 'O−'];
 
@@ -26,6 +27,7 @@ export default function MedicalProfileScreen() {
   const [saving, setSaving] = useState(false);
   const [profile, setProfile] = useState<any>(null);
   const [user, setUser] = useState<any>(null);
+  const [verificationRequest, setVerificationRequest] = useState<any>(null);
 
   const [bloodType, setBloodType] = useState('');
   const [conditions, setConditions] = useState('');
@@ -39,8 +41,22 @@ export default function MedicalProfileScreen() {
   const [tempMedications, setTempMedications] = useState('');
   const [tempAllergies, setTempAllergies] = useState('');
   const [tempNotes, setTempNotes] = useState('');
+  // Free-text answer to a hospital's "request more info", sent with the save.
+  const [tempResponse, setTempResponse] = useState('');
+
+  // Separate from the profile fetch so a failure here never blanks the profile.
+  const fetchVerificationStatus = async () => {
+    try {
+      setVerificationRequest(
+        await apiCall(ENDPOINTS.verificationMyStatus, 'GET', undefined, true)
+      );
+    } catch (err) {
+      console.log('Error fetching verification status:', err);
+    }
+  };
 
   useEffect(() => {
+    fetchVerificationStatus();
     const fetchData = async () => {
       try {
         const [profileData, userData] = await Promise.all([
@@ -75,8 +91,11 @@ export default function MedicalProfileScreen() {
     setTempMedications(medications);
     setTempAllergies(allergies);
     setTempNotes(notes);
+    setTempResponse('');
     setEditing(true);
   };
+
+  const infoRequested = verificationRequest?.status === 'info_requested';
 
   const saveEdit = async () => {
     setSaving(true);
@@ -88,6 +107,7 @@ export default function MedicalProfileScreen() {
         known_allergies: tempAllergies,
         paramedic_notes: tempNotes,
         data_sharing_consent: consent,
+        ...(infoRequested ? { response_to_hospital: tempResponse } : {}),
       }, true);
 
       setBloodType(tempBloodType);
@@ -97,10 +117,25 @@ export default function MedicalProfileScreen() {
       setNotes(tempNotes);
       setProfile(updated);
       setEditing(false);
+      // Any edit sends the profile back to the hospital for review.
+      fetchVerificationStatus();
 
-      Alert.alert('Saved', 'Your medical profile has been updated.');
+      const hasHospital = verificationRequest?.status && verificationRequest.status !== 'unsubmitted';
+      Alert.alert(
+        'Saved',
+        hasHospital
+          ? `Your medical profile has been updated and sent back to ${verificationRequest.hospital_name || 'your hospital'} for review.`
+          : 'Your medical profile has been updated. Choose a hospital to review it.'
+      );
     } catch (err: any) {
-      Alert.alert('Save Failed', err.detail || 'Could not save changes. Please try again.');
+      // Field errors come back keyed by field, e.g. consent switched off.
+      const fieldError = [
+        err?.data_sharing_consent?.[0] &&
+          `${err.data_sharing_consent[0]} Turn on "Share data with hospitals & ambulances" below, then save again.`,
+        err?.blood_type?.[0],
+        err?.response_to_hospital?.[0],
+      ].find(Boolean);
+      Alert.alert('Save Failed', fieldError || err?.detail || 'Could not save changes. Check your connection and try again.');
     } finally {
       setSaving(false);
     }
@@ -117,6 +152,17 @@ export default function MedicalProfileScreen() {
       setConsent(!value);
     }
   };
+
+  const badge = getVerificationBadge(verificationRequest, profile);
+
+  // Profile saved but no live hospital request — reachable by backing out
+  // of / closing the app on hospital-selection, a failed send, filling the
+  // profile in via Edit after skipping intake, or a withdrawn request.
+  // Keyed on my_status's explicit 'unsubmitted' (not just "no request
+  // loaded"), so a failed status fetch never offers to resubmit.
+  const notSentToHospital =
+    verificationRequest?.status === 'unsubmitted' &&
+    profile?.verification_status !== 'unsubmitted';
 
   if (loading) {
     return (
@@ -195,9 +241,9 @@ export default function MedicalProfileScreen() {
                 {user?.display_name || 'Patient'}
               </Text>
               <Text style={styles.identitySub}>Patient</Text>
-              <View style={styles.verifiedBadge}>
-                <Text style={styles.verifiedText}>
-                  {profile?.is_verified ? '✓  Verified' : '⏳  Pending'}
+              <View style={[styles.verifiedBadge, { backgroundColor: badge.bg }]}>
+                <Text style={[styles.verifiedText, { color: badge.color }]}>
+                  {badge.label}
                 </Text>
               </View>
             </View>
@@ -207,6 +253,79 @@ export default function MedicalProfileScreen() {
                 : 'Not yet\nupdated'}
             </Text>
           </View>
+
+          {/* Hospital's verdict — flagged or more info requested */}
+          {!editing && (verificationRequest?.status === 'flagged' ||
+            verificationRequest?.status === 'info_requested') && (
+            <View style={styles.statusCard}>
+              <Text style={styles.statusCardTitle}>
+                {verificationRequest.status === 'flagged'
+                  ? `${verificationRequest.hospital_name} needs to see you in person`
+                  : `${verificationRequest.hospital_name} needs more information`}
+              </Text>
+              {verificationRequest.hospital_note ? (
+                <Text style={styles.statusCardNote}>"{verificationRequest.hospital_note}"</Text>
+              ) : null}
+              {verificationRequest.status === 'flagged' ? (
+                <TouchableOpacity
+                  style={styles.statusCardBtn}
+                  onPress={() => router.push('/(patient)/visit-required' as any)}
+                >
+                  <Text style={styles.statusCardBtnText}>View visit details</Text>
+                </TouchableOpacity>
+              ) : (
+                <>
+                  <Text style={styles.statusCardHint}>
+                    Update anything they asked about, and add a reply if it doesn't fit a field.
+                    Saving sends your profile back to them for review.
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.statusCardBtn, { marginTop: Spacing.sm }]}
+                    onPress={startEdit}
+                  >
+                    <Text style={styles.statusCardBtnText}>Respond</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          )}
+
+          {editing && infoRequested && (
+            <View style={[styles.statusCard, styles.infoCard]}>
+              <Text style={styles.statusCardTitle}>
+                {verificationRequest.hospital_name} asked:
+              </Text>
+              {verificationRequest.hospital_note ? (
+                <Text style={styles.statusCardNote}>"{verificationRequest.hospital_note}"</Text>
+              ) : null}
+              <Text style={styles.fieldLabel}>YOUR REPLY (OPTIONAL)</Text>
+              <TextInput
+                style={[styles.input, styles.inputTall, styles.inputActive]}
+                value={tempResponse}
+                onChangeText={setTempResponse}
+                placeholder="Anything that doesn't fit the fields below"
+                placeholderTextColor={Colors.textSecondary}
+                multiline
+                maxLength={2000}
+              />
+            </View>
+          )}
+
+          {!editing && notSentToHospital && (
+            <View style={[styles.statusCard, styles.infoCard]}>
+              <Text style={styles.statusCardTitle}>No hospital is reviewing your profile yet</Text>
+              <Text style={styles.statusCardHint}>
+                Choose a hospital to review your medical information. You can still use SOS
+                in the meantime.
+              </Text>
+              <TouchableOpacity
+                style={[styles.statusCardBtn, { marginTop: Spacing.sm }]}
+                onPress={() => router.push('/(patient)/hospital-selection' as any)}
+              >
+                <Text style={styles.statusCardBtnText}>Choose a hospital</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
           {/* Blood type */}
           <Text style={styles.fieldLabel}>BLOOD TYPE</Text>
@@ -392,6 +511,31 @@ const styles = StyleSheet.create({
     borderRadius: BorderRadius.full,
   },
   verifiedText: { color: Colors.success, fontSize: FontSizes.xs, fontWeight: '600' },
+  statusCard: {
+    backgroundColor: '#1A0A0A',
+    borderWidth: 1,
+    borderColor: '#3A1A1A',
+    borderRadius: BorderRadius.md,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  infoCard: { backgroundColor: '#0D1B3E', borderColor: '#1E3A6E' },
+  statusCardTitle: { color: Colors.textPrimary, fontSize: FontSizes.sm, fontWeight: '600', marginBottom: Spacing.sm },
+  statusCardNote: {
+    color: Colors.textSecondary,
+    fontSize: FontSizes.xs,
+    fontStyle: 'italic',
+    lineHeight: 18,
+    marginBottom: Spacing.sm,
+  },
+  statusCardHint: { color: Colors.textSecondary, fontSize: FontSizes.xs },
+  statusCardBtn: {
+    backgroundColor: Colors.primary,
+    borderRadius: BorderRadius.sm,
+    padding: Spacing.sm,
+    alignItems: 'center',
+  },
+  statusCardBtnText: { color: Colors.white, fontSize: FontSizes.sm, fontWeight: '600' },
   updatedText: { color: Colors.textSecondary, fontSize: FontSizes.xs, textAlign: 'right', lineHeight: 16 },
   fieldLabel: {
     color: Colors.textSecondary,

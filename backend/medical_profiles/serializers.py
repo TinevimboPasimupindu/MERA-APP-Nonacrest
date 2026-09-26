@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from verification.services import record_patient_edit
 from .models import MedicalProfile, VerificationStatus
 
 
@@ -43,6 +44,12 @@ class MedicalProfileSerializer(serializers.ModelSerializer):
 
 class MedicalIntakeFormSerializer(serializers.ModelSerializer):
     data_sharing_consent = serializers.BooleanField()
+    # Optional free-text answer when a hospital has requested more info —
+    # for anything that doesn't fit a profile field. Stored on the
+    # verification request, not the profile (see record_patient_edit).
+    response_to_hospital = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, max_length=2000,
+    )
 
     class Meta:
         model = MedicalProfile
@@ -53,6 +60,7 @@ class MedicalIntakeFormSerializer(serializers.ModelSerializer):
             "known_allergies",
             "paramedic_notes",
             "data_sharing_consent",
+            "response_to_hospital",
         ]
 
     def validate_data_sharing_consent(self, value):
@@ -64,6 +72,7 @@ class MedicalIntakeFormSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         consent = validated_data.pop("data_sharing_consent", None)
+        response = validated_data.pop("response_to_hospital", "")
         for attr, val in validated_data.items():
             setattr(instance, attr, val)
         instance.save()
@@ -71,8 +80,9 @@ class MedicalIntakeFormSerializer(serializers.ModelSerializer):
         if consent:
             instance.grant_consent()
 
-        # Patient update always resets status to Pending
-        instance.submit_by_patient()
+        # Patient update always resets status to Pending, and reopens their
+        # VerificationRequest so the two stay in sync.
+        record_patient_edit(instance, response=response)
         return instance
 
 

@@ -49,10 +49,16 @@ def _ambulance_docs():
     }
 
 
+@override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
 class PatientRegistrationTest(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.url = reverse("register-patient")
+        # Registration now emails an OTP — never hit the real Brevo API.
+        patcher = patch("accounts.views.requests.post")
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
 
     def test_successful_registration(self):
         data = {
@@ -66,10 +72,13 @@ class PatientRegistrationTest(TestCase):
         }
         response = self.client.post(self.url, data)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertIn("access", response.data)
+        # Tokens only come after the registration OTP — see RegistrationOTPTest.
+        self.assertTrue(response.data.get("otp_required"))
+        self.assertNotIn("access", response.data)
         user = User.objects.get(email="thabo@example.com")
         self.assertEqual(user.role, Role.PATIENT)
         self.assertEqual(user.institutional_status, InstitutionalStatus.APPROVED)
+        self.assertFalse(user.email_verified)
 
     def test_duplicate_email_rejected(self):
         User.objects.create_user(email="thabo@example.com", password="pass", role=Role.PATIENT)
@@ -1274,7 +1283,8 @@ class AdminUserEditTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.patient.refresh_from_db()
         self.assertEqual(self.patient.full_name, "New Name")
-        self.assertEqual(self.patient.phone_number, "0829999999")
+        # Stored normalized to +27 — see accounts/validators.py.
+        self.assertEqual(self.patient.phone_number, "+27829999999")
 
     def test_can_edit_hospital_facility_name(self):
         url = reverse("admin-user-edit", args=[self.hospital.id])
@@ -2081,3 +2091,489 @@ class ThrottlingTest(TestCase):
 
         twenty_first = client.post(upload_url, {})
         self.assertEqual(twenty_first.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+@override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
+class InputFormatValidationTest(TestCase):
+    # accounts/validators.py — email shape and SA phone numbers, enforced
+    # server-side on every serializer that writes them.
+
+    def setUp(self):
+        self.client = APIClient()
+        self.url = reverse("register-patient")
+        patcher = patch("accounts.views.requests.post")
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
+
+    def _register(self, **overrides):
+        data = {
+            "full_name": "Lerato Nkosi",
+            "email": "lerato@example.com",
+            "phone_number": "082 123 4567",
+            "password": "SecurePass123!",
+            "confirm_password": "SecurePass123!",
+            "popi_consent": True,
+            "terms_consent": True,
+        }
+        data.update(overrides)
+        return self.client.post(self.url, data)
+
+    def test_local_phone_is_normalized_to_plus_27(self):
+        response = self._register()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(User.objects.get(email="lerato@example.com").phone_number, "+27821234567")
+
+    def test_accepted_phone_shapes(self):
+        from .validators import normalize_sa_phone
+        for raw in ["0821234567", "+27821234567", "+27 82 123 4567", "27821234567",
+                    "0027821234567", "(011) 555-1234"]:
+            with self.subTest(raw=raw):
+                self.assertTrue(normalize_sa_phone(raw).startswith("+27"))
+
+    def test_malformed_phones_rejected(self):
+        for raw in ["12345", "08212345678", "0921234567", "+2782123456", "+44 20 7946 0958",
+                    "phone", "0021234567"]:
+            with self.subTest(raw=raw):
+                response = self._register(phone_number=raw, email=f"x{abs(hash(raw))}@example.com")
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("phone_number", response.data)
+
+    def test_phone_required_for_patient(self):
+        response = self._register(phone_number="")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("phone_number", response.data)
+
+    def test_malformed_emails_rejected(self):
+        for raw in ["plainaddress", "a@b", "a..b@example.com", ".a@example.com",
+                    "a@-example.com", "a@example.c", "a@[127.0.0.1]", '"a b"@example.com',
+                    "a@example..com", "a b@example.com"]:
+            with self.subTest(raw=raw):
+                response = self._register(email=raw)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("email", response.data)
+
+    def test_well_formed_numeric_email_accepted(self):
+        # Shape alone can't tell 1242321@2323.com from 12345678@qq.com (a
+        # real provider's format) — registration OTP is what proves an
+        # inbox exists, not this validator.
+        response = self._register(email="12345678@qq.com")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_emt_and_admin_edit_paths_validate_too(self):
+        amb = User.objects.create_user(email="amb-v@example.com", password="pass", role=Role.AMBULANCE_ADMIN)
+        mera = User.objects.create_user(email="mera-v@example.com", password="pass", role=Role.MERA_ADMIN)
+        self.client.force_authenticate(user=amb)
+        response = self.client.post(reverse("admin-create-emt"), {
+            "full_name": "EMT", "email": "emt-v@example", "phone_number": "123",
+            "password": "SecurePass123!", "confirm_password": "SecurePass123!",
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("email", response.data)
+        self.assertIn("phone_number", response.data)
+
+        self.client.force_authenticate(user=mera)
+        response = self.client.patch(reverse("admin-user-edit", args=[amb.id]), {"phone_number": "abc"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("phone_number", response.data)
+
+
+@override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
+class RegistrationOTPTest(TestCase):
+    # Registration reuses the login OTP mechanism: no tokens until the
+    # emailed code is confirmed. Login OTP itself is covered, unchanged, by
+    # EmailOTPLoginTest above.
+
+    def setUp(self):
+        self.client = APIClient()
+        patcher = patch("accounts.views.requests.post")
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
+
+    def _register(self, email="reg-otp@example.com"):
+        return self.client.post(reverse("register-patient"), {
+            "full_name": "Reg Patient", "email": email, "phone_number": "0821234567",
+            "password": "SecurePass123!", "confirm_password": "SecurePass123!",
+            "popi_consent": True, "terms_consent": True,
+        })
+
+    def _live_otp(self, user):
+        return EmailOTP.objects.get(user=user, used=False)
+
+    def test_registration_sends_code_and_issues_no_tokens(self):
+        response = self._register()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["otp_required"])
+        self.assertNotIn("access", response.data)
+        self.assertNotIn("refresh", response.data)
+        user = User.objects.get(email="reg-otp@example.com")
+        self.assertEqual(response.data["user_id"], str(user.id))
+        self.assertFalse(user.email_verified)
+        self.assertEqual(self.mock_post.call_count, 1)
+        text = self.mock_post.call_args.kwargs["json"]["textContent"]
+        self.assertIn(self._live_otp(user).code, text)
+        self.assertIn("finish creating your account", text)
+
+    def test_correct_code_verifies_email_and_returns_tokens(self):
+        self._register()
+        user = User.objects.get(email="reg-otp@example.com")
+        response = self.client.post(reverse("verify-otp"), {"user_id": str(user.id), "code": self._live_otp(user).code})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertTrue(response.data["registration_completed"])
+        user.refresh_from_db()
+        self.assertTrue(user.email_verified)
+
+    def test_wrong_code_leaves_account_unverified(self):
+        self._register()
+        user = User.objects.get(email="reg-otp@example.com")
+        wrong = "000000" if self._live_otp(user).code != "000000" else "111111"
+        response = self.client.post(reverse("verify-otp"), {"user_id": str(user.id), "code": wrong})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotIn("access", response.data)
+        user.refresh_from_db()
+        self.assertFalse(user.email_verified)
+
+    def test_resend_works_during_registration(self):
+        self._register()
+        user = User.objects.get(email="reg-otp@example.com")
+        first = self._live_otp(user)
+        response = self.client.post(reverse("resend-otp"), {"user_id": str(user.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.mock_post.call_count, 2)
+        # Shared helper's "one live code at a time" rule still applies.
+        self.assertNotEqual(self._live_otp(user).pk, first.pk)
+
+    def test_delivery_failure_still_creates_account_and_allows_resend(self):
+        self.mock_post.side_effect = requests.Timeout("Brevo took too long")
+        response = self._register()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["otp_delivery_failed"])
+        self.assertNotIn("access", response.data)
+        user = User.objects.get(email="reg-otp@example.com")
+
+        self.mock_post.side_effect = None
+        response = self.client.post(reverse("resend-otp"), {"user_id": str(user.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(self._live_otp(user).code)
+
+    def test_abandoned_registration_completes_via_login_otp(self):
+        self._register()
+        user = User.objects.get(email="reg-otp@example.com")
+        response = self.client.post(reverse("login"), {
+            "email": "reg-otp@example.com", "password": "SecurePass123!",
+        })
+        self.assertTrue(response.data["otp_required"])
+        self.assertNotIn("access", response.data)
+        response = self.client.post(reverse("verify-otp"), {"user_id": str(user.id), "code": self._live_otp(user).code})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["registration_completed"])
+        user.refresh_from_db()
+        self.assertTrue(user.email_verified)
+
+    def test_existing_patient_login_is_not_a_registration(self):
+        user = User.objects.create_user(
+            email="existing@example.com", password="SecurePass123!", role=Role.PATIENT,
+        )
+        self.assertTrue(user.email_verified)  # default for every existing/other account
+        self.client.post(reverse("login"), {"email": "existing@example.com", "password": "SecurePass123!"})
+        text = self.mock_post.call_args.kwargs["json"]["textContent"]
+        self.assertIn("login verification code", text)
+        response = self.client.post(reverse("verify-otp"), {"user_id": str(user.id), "code": self._live_otp(user).code})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["registration_completed"])
+
+
+class InstitutionDocumentsUpdateTest(TestCase):
+    # PATCH /auth/admin/institutions/{id}/documents/ — renew documents, or
+    # add them for institutions created before they were required.
+    # Cloudinary is mocked, same as RequiredInstitutionDocumentsTest.
+
+    def setUp(self):
+        self.mera_admin = User.objects.create_user(
+            email="mera-redocs@example.com", password="pass", role=Role.MERA_ADMIN,
+        )
+        # Created directly, with no documents — like pre-requirement accounts.
+        self.hospital = User.objects.create_user(
+            email="old-hosp@example.com", password="pass", role=Role.HOSPITAL_ADMIN,
+            facility_name="Old Hospital",
+        )
+        self.ambulance = User.objects.create_user(
+            email="old-amb@example.com", password="pass", role=Role.AMBULANCE_SERVICE,
+            service_name="Old Ambulance",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.mera_admin)
+
+        patcher = patch("accounts.serializers.cloudinary_upload")
+        self.mock_upload = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_upload.side_effect = lambda f, **kw: {"secure_url": f"https://res.cloudinary.com/mera-test/{f.name}"}
+
+    def _url(self, user):
+        return reverse("admin-institution-documents", args=[user.id])
+
+    def _file(self, name):
+        return SimpleUploadedFile(name, b"fake-pdf-bytes", content_type="application/pdf")
+
+    def test_backfill_documents_for_institution_created_without_them(self):
+        response = self.client.patch(
+            self._url(self.hospital),
+            {"health_facility_certificate": self._file("cert.pdf"), "cipc_registration_document": self._file("cipc.pdf")},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.hospital.refresh_from_db()
+        self.assertTrue(self.hospital.health_facility_certificate_url.endswith("cert.pdf"))
+        self.assertTrue(self.hospital.cipc_registration_url.endswith("cipc.pdf"))
+        self.assertTrue(response.data["cipc_registration_url"].endswith("cipc.pdf"))
+
+    def test_replace_one_document_leaves_the_other(self):
+        self.hospital.cipc_registration_url = "https://res.cloudinary.com/mera-test/original-cipc.pdf"
+        self.hospital.save()
+        response = self.client.patch(
+            self._url(self.hospital), {"health_facility_certificate": self._file("renewed.pdf")}, format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.hospital.refresh_from_db()
+        self.assertTrue(self.hospital.health_facility_certificate_url.endswith("renewed.pdf"))
+        self.assertTrue(self.hospital.cipc_registration_url.endswith("original-cipc.pdf"))
+
+    def test_ambulance_legacy_role_supported(self):
+        response = self.client.patch(
+            self._url(self.ambulance), {"ems_operating_license": self._file("ems.pdf")}, format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.ambulance.refresh_from_db()
+        self.assertTrue(self.ambulance.ems_operating_license_url.endswith("ems.pdf"))
+
+    def test_other_institution_types_documents_rejected(self):
+        response = self.client.patch(
+            self._url(self.hospital), {"ems_operating_license": self._file("ems.pdf")}, format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("ems_operating_license", response.data)
+        self.mock_upload.assert_not_called()
+
+    def test_empty_request_rejected(self):
+        response = self.client.patch(self._url(self.hospital), {}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_non_institution_is_404(self):
+        patient = User.objects.create_user(email="p-docs@example.com", password="pass", role=Role.PATIENT)
+        response = self.client.patch(
+            self._url(patient), {"health_facility_certificate": self._file("x.pdf")}, format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_upload_failure_changes_nothing(self):
+        self.hospital.cipc_registration_url = "https://res.cloudinary.com/mera-test/original-cipc.pdf"
+        self.hospital.save()
+        calls = {"n": 0}
+
+        def flaky(f, **kw):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("cloudinary down")
+            return {"secure_url": f"https://res.cloudinary.com/mera-test/{f.name}"}
+
+        self.mock_upload.side_effect = flaky
+        response = self.client.patch(
+            self._url(self.hospital),
+            {"health_facility_certificate": self._file("cert.pdf"), "cipc_registration_document": self._file("cipc.pdf")},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.hospital.refresh_from_db()
+        self.assertEqual(self.hospital.health_facility_certificate_url, "")
+        self.assertTrue(self.hospital.cipc_registration_url.endswith("original-cipc.pdf"))
+
+    def test_mera_admin_only(self):
+        self.client.force_authenticate(user=self.hospital)
+        response = self.client.patch(
+            self._url(self.hospital), {"health_facility_certificate": self._file("x.pdf")}, format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_institutions_list_carries_raw_name_for_edit_prefill(self):
+        response = self.client.get(reverse("admin-institutions"))
+        row = next(r for r in response.data if r["id"] == str(self.hospital.id))
+        self.assertEqual(row["facility_name"], "Old Hospital")
+
+
+def _with_luhn(first12):
+    # Append the Luhn check digit that makes a 13-digit SA ID checksum-valid,
+    # so date/citizenship rules can be tested independently of the checksum.
+    for d in "0123456789":
+        candidate = first12 + d
+        total = 0
+        for i, ch in enumerate(reversed(candidate)):
+            n = int(ch)
+            if i % 2 == 1:
+                n = n * 2 - 9 if n * 2 > 9 else n * 2
+            total += n
+        if total % 10 == 0:
+            return candidate
+    raise AssertionError("unreachable")
+
+
+@override_settings(BREVO_API_KEY="test-brevo-key", BREVO_SENDER_EMAIL="noreply@test.mera.example")
+class PatientIDNumberTest(TestCase):
+    # User.id_number — SA ID or passport, validated server-side, stored,
+    # and never returned by the API.
+
+    VALID_SA_ID = "8001015009087"
+
+    def setUp(self):
+        self.client = APIClient()
+        patcher = patch("accounts.views.requests.post")
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_post.return_value = Mock(status_code=201, raise_for_status=Mock())
+
+    def _register(self, id_number=None, email="id-patient@example.com"):
+        data = {
+            "full_name": "Ayanda Zulu", "email": email, "phone_number": "0821234567",
+            "password": "SecurePass123!", "confirm_password": "SecurePass123!",
+            "popi_consent": True, "terms_consent": True,
+        }
+        if id_number is not None:
+            data["id_number"] = id_number
+        return self.client.post(reverse("register-patient"), data)
+
+    # Validation
+
+    def test_valid_sa_id_accepted_and_stored(self):
+        response = self._register(self.VALID_SA_ID)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(User.objects.get(email="id-patient@example.com").id_number, self.VALID_SA_ID)
+
+    def test_valid_passports_accepted_and_normalized(self):
+        for i, (raw, stored) in enumerate([("A12345678", "A12345678"), (" a1234 5678 ", "A12345678"),
+                                          ("M00123456", "M00123456"), ("123ABC", "123ABC")]):
+            with self.subTest(raw=raw):
+                response = self._register(raw, email=f"pp{i}@example.com")
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(User.objects.get(email=f"pp{i}@example.com").id_number, stored)
+
+    def test_bad_checksum_rejected(self):
+        response = self._register("8001015009088")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("id_number", response.data)
+
+    def test_invalid_birth_date_rejected_even_with_valid_checksum(self):
+        for first12 in ["801301500908", "800230500908", "000000500908"]:  # month 13, 30 Feb, month 0
+            sa_id = _with_luhn(first12)
+            with self.subTest(sa_id=sa_id):
+                response = self._register(sa_id)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("date of birth", str(response.data["id_number"][0]))
+
+    def test_future_birth_date_rejected(self):
+        tomorrow = timezone.localdate() + timedelta(days=1)
+        if tomorrow.year != timezone.localdate().year:
+            self.skipTest("Year boundary — two-digit year can't express a future date today.")
+        sa_id = _with_luhn(tomorrow.strftime("%y%m%d") + "500908")
+        response = self._register(sa_id)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bad_citizenship_digit_rejected(self):
+        response = self._register(_with_luhn("800101500938"))  # C = 3
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_malformed_numbers_rejected(self):
+        # All digits but not 13 long → treated as a bad SA ID; otherwise a
+        # bad passport (no digit, too short, too long, punctuation).
+        for i, raw in enumerate(["12345", "80010150090870", "ABCDEFGH", "A123", "A1234567890123", "A123-4567"]):
+            with self.subTest(raw=raw):
+                response = self._register(raw, email=f"bad{i}@example.com")
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("id_number", response.data)
+
+    def test_optional_blank_or_omitted(self):
+        self.assertEqual(self._register("", email="blank@example.com").status_code, status.HTTP_201_CREATED)
+        self.assertEqual(self._register(None, email="omit@example.com").status_code, status.HTTP_201_CREATED)
+        self.assertEqual(User.objects.get(email="blank@example.com").id_number, "")
+        self.assertEqual(User.objects.get(email="omit@example.com").id_number, "")
+
+    # End to end: registration → OTP → usable session, ID persisted
+
+    def test_registration_end_to_end_persists_id(self):
+        self._register(self.VALID_SA_ID)
+        user = User.objects.get(email="id-patient@example.com")
+        code = EmailOTP.objects.get(user=user, used=False).code
+        response = self.client.post(reverse("verify-otp"), {"user_id": str(user.id), "code": code})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn(self.VALID_SA_ID, str(response.data))
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
+        me = self.client.get(reverse("me"))
+        self.assertEqual(me.status_code, status.HTTP_200_OK)
+        self.assertNotIn(self.VALID_SA_ID, str(me.data))
+        user.refresh_from_db()
+        self.assertEqual(user.id_number, self.VALID_SA_ID)
+
+    # Exposure
+
+    def test_never_returned_by_api(self):
+        response = self._register(self.VALID_SA_ID)
+        self.assertNotIn(self.VALID_SA_ID, str(response.data))
+        patient = User.objects.get(email="id-patient@example.com")
+
+        mera = User.objects.create_user(email="mera-id@example.com", password="pass", role=Role.MERA_ADMIN)
+        admin_client = APIClient()
+        admin_client.force_authenticate(user=mera)
+        for url in [reverse("admin-users"), reverse("admin-institutions")]:
+            self.assertNotIn(self.VALID_SA_ID, str(admin_client.get(url).data))
+        edited = admin_client.patch(reverse("admin-user-edit", args=[patient.id]), {"full_name": "New"})
+        self.assertNotIn(self.VALID_SA_ID, str(edited.data))
+
+    def test_not_in_emt_medical_summary(self):
+        from types import SimpleNamespace
+        from emergencies.serializers import IncidentAmbulanceActiveSerializer
+
+        self._register(self.VALID_SA_ID)
+        patient = User.objects.get(email="id-patient@example.com")
+        profile = patient.medical_profile
+        # Verified, so the summary includes everything it ever includes.
+        from medical_profiles.models import VerificationStatus
+        profile.verification_status = VerificationStatus.VERIFIED
+        profile.save()
+        summary = IncidentAmbulanceActiveSerializer().get_medical_summary(SimpleNamespace(patient=patient))
+        self.assertTrue(summary["profile_verified"])
+        self.assertNotIn(self.VALID_SA_ID, str(summary))
+
+    def test_no_serializer_exposes_it(self):
+        # Guard against someone adding id_number to a response later: the
+        # only serializer that may declare it is registration, write-only.
+        import inspect
+        from importlib import import_module
+        from rest_framework import serializers as drf
+
+        for module_name in ["accounts.serializers", "emergencies.serializers", "verification.serializers",
+                            "medical_profiles.serializers", "emergency_contacts.serializers", "chatbot.serializers"]:
+            module = import_module(module_name)
+            for name, cls in inspect.getmembers(module, inspect.isclass):
+                if not issubclass(cls, drf.ModelSerializer) or cls.__module__ != module_name:
+                    continue
+                fields = getattr(getattr(cls, "Meta", None), "fields", []) or []
+                if "id_number" in fields:
+                    with self.subTest(serializer=name):
+                        self.assertEqual(name, "PatientRegistrationSerializer")
+                        self.assertTrue(cls.Meta.extra_kwargs["id_number"]["write_only"])
+
+    def test_existing_patient_without_id_still_works(self):
+        # Pre-existing accounts have a blank id_number and nothing requires one.
+        old = User.objects.create_user(email="old-p@example.com", password="SecurePass123!", role=Role.PATIENT)
+        self.assertEqual(old.id_number, "")
+        self.client.post(reverse("login"), {"email": "old-p@example.com", "password": "SecurePass123!"})
+        code = EmailOTP.objects.get(user=old, used=False).code
+        response = self.client.post(reverse("verify-otp"), {"user_id": str(old.id), "code": code})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
+        self.assertEqual(self.client.get(reverse("me")).status_code, status.HTTP_200_OK)
+        profile = self.client.patch(reverse("medical-profile-submit"), {
+            "blood_type": "O+", "chronic_conditions": "None", "current_medications": "None",
+            "known_allergies": "None", "data_sharing_consent": True,
+        })
+        self.assertEqual(profile.status_code, status.HTTP_200_OK)

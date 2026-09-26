@@ -41,7 +41,6 @@ export default function AmbulanceDashboard() {
     try {
       console.log('Fetching alerts...');
       const alertsData = await apiCall('/incidents/active_alerts/', 'GET', undefined, true);
-      console.log('Alerts data:', JSON.stringify(alertsData));
 
       const alertsRaw = alertsData as any;
       const alertsList = Array.isArray(alertsRaw)

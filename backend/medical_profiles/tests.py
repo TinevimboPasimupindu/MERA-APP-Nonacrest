@@ -5,6 +5,7 @@ from django.urls import reverse
 
 from accounts.models import User, Role, InstitutionalStatus
 from verification.models import VerificationRequest, VerificationRequestStatus
+from verification.services import approve_verification
 from .models import MedicalProfile, VerificationStatus
 
 
@@ -59,6 +60,34 @@ class MedicalIntakeFormTest(TestCase):
         })
         profile.refresh_from_db()
         self.assertEqual(profile.verification_status, VerificationStatus.PENDING)
+
+    def test_editing_verified_profile_resets_to_pending_and_requeues(self):
+        # A hospital-verified badge must not survive an unreviewed edit, and
+        # the patient must reappear in that hospital's queue.
+        hospital = User.objects.create_user(
+            email="h@example.com", password="pass", role=Role.HOSPITAL,
+            institutional_status=InstitutionalStatus.APPROVED,
+            is_active=True, facility_name="Test Hospital",
+        )
+        req = VerificationRequest.objects.create(
+            patient=self.user, hospital=hospital, status=VerificationRequestStatus.PENDING,
+        )
+        approve_verification(req, reviewed_by=hospital)
+        profile = self.user.medical_profile
+        profile.refresh_from_db()
+        self.assertTrue(profile.is_verified)
+
+        response = self.client.patch(reverse("medical-profile-submit"), {
+            "known_allergies": "Latex",
+            "data_sharing_consent": True,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["verification_status"], VerificationStatus.PENDING)
+        profile.refresh_from_db()
+        req.refresh_from_db()
+        self.assertEqual(profile.verification_status, VerificationStatus.PENDING)
+        self.assertFalse(profile.is_verified)
+        self.assertEqual(req.status, VerificationRequestStatus.PENDING)
 
 
 class ConsentTest(TestCase):

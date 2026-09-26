@@ -44,13 +44,7 @@ class VerificationViewSet(GenericViewSet):
 
     @action(detail=False, methods=["get"], permission_classes=[permissions.IsAuthenticated, IsPatient])
     def my_status(self, request):
-        latest = (
-            VerificationRequest.objects
-            .filter(patient=request.user)
-            .exclude(status=VerificationRequestStatus.WITHDRAWN)
-            .order_by("-submitted_at")
-            .first()
-        )
+        latest = services.latest_active_request(request.user)
         if not latest:
             return Response({"detail": "No verification request found.", "status": "unsubmitted"})
         return Response(VerificationRequestSerializer(latest).data)
@@ -102,13 +96,32 @@ class VerificationViewSet(GenericViewSet):
         profile = getattr(ver_request.patient, "medical_profile", None)
         if not profile:
             return Response({"detail": "Patient has no medical profile."}, status=404)
-        return Response(MedicalProfileSerializer(profile).data)
+        # The request itself travels alongside the profile so a re-review
+        # after "request more info" shows what was asked (hospital_note)
+        # and the patient's answer, not just the updated fields.
+        return Response({
+            **MedicalProfileSerializer(profile).data,
+            "request": {
+                "status": ver_request.status,
+                "hospital_note": ver_request.hospital_note,
+                "reviewed_at": ver_request.reviewed_at,
+                "patient_response": ver_request.patient_response,
+                "patient_responded_at": ver_request.patient_responded_at,
+            },
+        })
 
     # Hospital: approve / flag / request info
 
     @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated, IsHospital])
     def action(self, request, pk=None):
         ver_request = self._get_hospital_request(pk, request.user)
+        if ver_request.status == VerificationRequestStatus.WITHDRAWN:
+            # The patient has since submitted to another hospital; acting on
+            # this stale request would overwrite their current profile status.
+            return Response(
+                {"detail": "This request was withdrawn by the patient."},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         serializer = HospitalVerificationActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

@@ -51,12 +51,17 @@ class SOSTriggerTest(TestCase):
         self.assertEqual(incident.status, IncidentStatus.PENDING_CONFIRMATION)
         self.assertTrue(created)
 
-    def test_unverified_patient_cannot_trigger_sos(self):
+    def test_unverified_patient_can_still_trigger_sos(self):
+        # Deliberate: dispatch never waits on hospital verification — see
+        # services._patient_may_trigger_sos.
         user = User.objects.create_user(
             email="unverified@test.com", password="pass", role=Role.PATIENT
         )
-        with self.assertRaises(PermissionError):
-            services.trigger_sos(user, {})
+        incident, created = services.trigger_sos(
+            user, {"latitude": -26.2, "longitude": 28.0}
+        )
+        self.assertTrue(created)
+        self.assertEqual(incident.status, IncidentStatus.PENDING_CONFIRMATION)
 
     def test_triggering_sos_again_returns_existing_incident_not_a_duplicate(self):
         # The double-tap case: a second call while the first incident is
@@ -655,6 +660,42 @@ class AcceptIncidentTest(TestCase):
         services.update_incident_status(incident, IncidentStatus.COMPLETED, actor=ambulance)
         incident.refresh_from_db()
         self.assertFalse(incident.medical_profile_access_granted)
+
+
+class EMTMedicalSummaryGatingTest(TestCase):
+    # Unverified profiles: responder gets the name only, never medical data.
+
+    def _summary_for(self, patient):
+        from .serializers import IncidentAmbulanceActiveSerializer
+        profile = patient.medical_profile
+        profile.blood_type = "O-"
+        profile.known_allergies = "Penicillin"
+        profile.save()
+        incident = Incident.objects.create(patient=patient, status=IncidentStatus.DISPATCHED)
+        return IncidentAmbulanceActiveSerializer(incident).data["medical_summary"]
+
+    def test_verified_profile_includes_medical_details(self):
+        summary = self._summary_for(make_verified_patient())
+        self.assertTrue(summary["profile_verified"])
+        self.assertEqual(summary["blood_type"], "O-")
+        self.assertEqual(summary["known_allergies"], "Penicillin")
+
+    def test_unverified_profile_withholds_medical_details(self):
+        for status_value in (
+            VerificationStatus.UNSUBMITTED, VerificationStatus.PENDING,
+            VerificationStatus.FLAGGED, VerificationStatus.INFO_REQUESTED,
+        ):
+            with self.subTest(status=status_value):
+                patient = User.objects.create_user(
+                    email=f"{status_value}@test.com", password="pass",
+                    role=Role.PATIENT, full_name="Una Verified",
+                )
+                patient.medical_profile.verification_status = status_value
+                patient.medical_profile.save()
+                summary = self._summary_for(patient)
+                self.assertEqual(
+                    summary, {"full_name": "Una Verified", "profile_verified": False}
+                )
 
 
 class EMTIncidentAttributionTest(TestCase):

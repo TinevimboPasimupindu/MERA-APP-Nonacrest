@@ -33,6 +33,7 @@ export const ENDPOINTS = {
 
   // MERA super-admin
   institutions: '/auth/admin/institutions/',
+  institutionDocuments: (id) => `/auth/admin/institutions/${id}/documents/`,
   users: '/auth/admin/users/',
   stats: '/auth/admin/stats/',
   editUser: (id) => `/auth/admin/users/${id}/`,
@@ -119,11 +120,17 @@ export const apiCall = async (endpoint, method = 'GET', body = null, requiresAut
     if (token) headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${BASE_URL}${endpoint}`, {
-    method,
-    headers,
-    body: body ? (isFormData ? body : JSON.stringify(body)) : undefined,
-  });
+  let response;
+  try {
+    response = await fetch(`${BASE_URL}${endpoint}`, {
+      method,
+      headers,
+      body: body ? (isFormData ? body : JSON.stringify(body)) : undefined,
+    });
+  } catch {
+    // fetch only rejects when no response arrived at all.
+    throw { status: 0, detail: NETWORK_ERROR };
+  }
 
   if (response.status === 401 && requiresAuth && _retry && getRefreshToken()) {
     try {
@@ -140,7 +147,7 @@ export const apiCall = async (endpoint, method = 'GET', body = null, requiresAut
   // Empty body (e.g. DRF destroy() → 204 No Content) is a valid response,
   // not a parse failure — JSON.parse('') would throw and look like an error.
   if (!text) {
-    if (!response.ok) throw { status: response.status, detail: `Server error ${response.status}` };
+    if (!response.ok) throw { status: response.status, detail: statusMessage(response.status) };
     return null;
   }
 
@@ -148,12 +155,52 @@ export const apiCall = async (endpoint, method = 'GET', body = null, requiresAut
   try {
     data = JSON.parse(text);
   } catch {
-    throw { status: response.status, detail: `Server error ${response.status}` };
+    throw { status: response.status, detail: statusMessage(response.status) };
   }
 
   if (!response.ok) {
-    throw { status: response.status, ...data };
+    throw normalizeError(response.status, data);
   }
 
   return data;
 };
+
+// Every error apiCall throws carries a specific, human-readable `detail`, so
+// a page's `err.detail || '...'` shows what actually went wrong (no
+// connection, server fault, which field was rejected) instead of a generic
+// fallback. Field errors stay on the object for pages that label a field.
+
+const NETWORK_ERROR = "Can't reach the MERA server. Check your internet connection and try again.";
+
+function statusMessage(status) {
+  if (status >= 500) {
+    return `The MERA server had a problem (error ${status}). Wait a minute and try again — if it keeps happening, contact MERA support.`;
+  }
+  if (status === 404) return "That item couldn't be found — it may have been removed.";
+  if (status === 403) return "Your account isn't allowed to do that.";
+  if (status === 401) return 'Your session has expired. Please log in again.';
+  return `The request couldn't be completed (error ${status}).`;
+}
+
+const humanize = (field) => field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, ' ');
+
+function firstMessage(value) {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return firstMessage(value[0]);
+  if (value && typeof value === 'object') return firstMessage(Object.values(value)[0]);
+  return null;
+}
+
+function normalizeError(status, data) {
+  const err = { status, ...(data && typeof data === 'object' ? data : {}) };
+  if (!err.detail) {
+    const field = Object.keys(err).find((k) => k !== 'status' && firstMessage(err[k]));
+    if (field) {
+      const msg = firstMessage(err[field]);
+      err.detail = field === 'non_field_errors' ? msg : `${humanize(field)}: ${msg}`;
+    } else {
+      err.detail = statusMessage(status);
+    }
+  }
+  return err;
+}

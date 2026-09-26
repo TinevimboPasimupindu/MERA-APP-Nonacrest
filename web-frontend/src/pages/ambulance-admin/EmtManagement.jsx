@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiCall, ENDPOINTS } from '../../services/api';
+import { firstFieldError, formFormatError } from '../../utils/validation';
 import DashboardShell from '../../components/DashboardShell';
 import StatusBadge from '../../components/StatusBadge';
 
@@ -45,13 +46,18 @@ function CreateEmtModal({ onClose, onCreated }) {
       setError('Passwords do not match.');
       return;
     }
+    const formatError = formFormatError(form, CREATE_FIELDS);
+    if (formatError) {
+      setError(formatError);
+      return;
+    }
 
     setBusy(true);
     try {
       await apiCall(ENDPOINTS.createEmt, 'POST', form);
       onCreated();
     } catch (err) {
-      setError(err.detail || 'Could not create that EMT account. Check the fields and try again.');
+      setError(firstFieldError(err, CREATE_FIELDS) || err.detail || 'Could not create that EMT account. Check the fields and try again.');
     } finally {
       setBusy(false);
     }
@@ -112,12 +118,17 @@ function EditEmtModal({ emt, onClose, onSaved }) {
   const submit = async (e) => {
     e.preventDefault();
     setError(null);
+    const formatError = formFormatError(form, EDIT_FIELDS);
+    if (formatError) {
+      setError(formatError);
+      return;
+    }
     setBusy(true);
     try {
       await apiCall(ENDPOINTS.emtUpdate(emt.id), 'PATCH', form);
       onSaved();
     } catch (err) {
-      setError(err.detail || 'Could not save changes. Check the fields and try again.');
+      setError(firstFieldError(err, EDIT_FIELDS) || err.detail || 'Could not save changes. Check the fields and try again.');
     } finally {
       setBusy(false);
     }

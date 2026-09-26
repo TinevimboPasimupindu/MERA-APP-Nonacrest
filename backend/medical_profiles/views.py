@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
 from accounts.permissions import IsHospital, IsPatient
-from verification.models import VerificationRequest
+from verification.models import VerificationRequest, VerificationRequestStatus
 from .models import MedicalProfile
 from .serializers import (
     ConsentSerializer,
@@ -114,8 +114,12 @@ class MedicalProfileViewSet(GenericViewSet):
         # Same "does this patient belong to this hospital" rule as the
         # verification queue endpoints, just without the status filter
         # they apply — see verification/views.py queue()/approved()/flagged().
+        # Withdrawn requests don't count: a patient who moved to another
+        # hospital is no longer this hospital's patient.
         patient_ids = VerificationRequest.objects.filter(
             hospital=request.user
+        ).exclude(
+            status=VerificationRequestStatus.WITHDRAWN
         ).values_list("patient_id", flat=True).distinct()
 
         profiles = MedicalProfile.objects.filter(

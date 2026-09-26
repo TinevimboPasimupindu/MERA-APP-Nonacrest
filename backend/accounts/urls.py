@@ -16,6 +16,7 @@ from .views import (
     HospitalRegisterView,
     InstitutionalApprovalView,
     InstitutionalDocumentUploadView,
+    InstitutionDocumentsView,
     InstitutionsListView,
     LoginView,
     MeView,
@@ -79,6 +80,11 @@ urlpatterns = [
 
     # MERA Admin: institutions, platform stats, account management
     path("admin/institutions/",                  InstitutionsListView.as_view(), name="admin-institutions"),
+    path(
+        "admin/institutions/<uuid:user_id>/documents/",
+        InstitutionDocumentsView.as_view(),
+        name="admin-institution-documents",
+    ),
     path("admin/stats/",                         PlatformStatsView.as_view(),    name="admin-stats"),
     path("admin/users/",                         AllUsersListView.as_view(),     name="admin-users"),
     path("admin/users/<uuid:user_id>/",             AdminUserEditView.as_view(),  name="admin-user-edit"),

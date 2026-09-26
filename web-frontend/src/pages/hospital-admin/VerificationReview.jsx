@@ -83,6 +83,37 @@ export default function VerificationReview() {
         <StatusBadge status={profile.verification_status} />
       </div>
 
+      {profile.request?.status === 'info_requested' && (
+        <div className="card section-card">
+          <div className="section-card-header">
+            <h2>Waiting on the patient</h2>
+          </div>
+          <p>
+            You asked for more information on {formatWhen(profile.request.reviewed_at)}. The patient
+            hasn&apos;t responded yet — this will move back to your queue when they do.
+          </p>
+          <ProfileField label="Your request" value={profile.request.hospital_note} full />
+        </div>
+      )}
+
+      {profile.request?.patient_responded_at && profile.request.status !== 'info_requested' && (
+        <div className="card section-card">
+          <div className="section-card-header">
+            <h2>Response to your request</h2>
+          </div>
+          <p>
+            The patient updated their profile on {formatWhen(profile.request.patient_responded_at)} in
+            answer to your request for more information.
+          </p>
+          <ProfileField label="You asked" value={profile.request.hospital_note} full />
+          <ProfileField
+            label="Patient's reply"
+            value={profile.request.patient_response || 'No written reply — see the updated details below.'}
+            full
+          />
+        </div>
+      )}
+
       <div className="card section-card">
         <div className="section-card-header">
           <h2>Medical details</h2>
@@ -134,6 +165,13 @@ export default function VerificationReview() {
       )}
     </div>
   );
+}
+
+function formatWhen(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
 }
 
 function ProfileField({ label, value, full = false }) {

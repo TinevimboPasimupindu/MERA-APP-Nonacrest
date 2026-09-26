@@ -15,6 +15,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from rest_framework import serializers
 
+from .validators import SAPhoneFieldsMixin, normalize_id_or_passport, validate_email_format
 from .models import (
     AMBULANCE_ROLES,
     EmailOTP,
@@ -78,7 +79,7 @@ def _validate_successor(user_id, role_set, type_label):
 
 # Patient registration
 
-class PatientRegistrationSerializer(serializers.ModelSerializer):
+class PatientRegistrationSerializer(SAPhoneFieldsMixin, serializers.ModelSerializer):
     # Register a new patient account.
     # POPI Act consent is captured here (popi_consent must be True).
 
@@ -93,13 +94,28 @@ class PatientRegistrationSerializer(serializers.ModelSerializer):
             "full_name",
             "email",
             "phone_number",
+            "id_number",
             "password",
             "confirm_password",
             "popi_consent",
             "terms_consent",
         ]
+        # The model allows blank (other roles may not have one), but a
+        # patient's number is what ambulances and hospitals call them on.
+        # id_number is write-only: stored for identity verification/audit,
+        # never echoed back (see User.id_number).
+        extra_kwargs = {
+            "phone_number": {"required": True, "allow_blank": False},
+            "id_number": {"required": False, "allow_blank": True, "write_only": True},
+        }
+
+    def validate_id_number(self, value):
+        # Optional on the register screen; validated whenever it's given —
+        # the app's own check isn't trusted on its own.
+        return normalize_id_or_passport(value) if value and value.strip() else ""
 
     def validate_email(self, value):
+        value = validate_email_format(value)
         _check_email_unique(value)
         return value
 
@@ -122,9 +138,12 @@ class PatientRegistrationSerializer(serializers.ModelSerializer):
         validated_data.pop("popi_consent")
         validated_data.pop("terms_consent")
 
+        # Unverified until the registration OTP is entered — see
+        # User.email_verified and PatientRegisterView.
         return User.objects.create_user(
             role=Role.PATIENT,
             institutional_status=InstitutionalStatus.APPROVED,
+            email_verified=False,
             **validated_data,
         )
 
@@ -198,7 +217,7 @@ class GoogleSignInSerializer(serializers.Serializer):
 
 # Hospital registration (step 1 + 2 combined, docs in step 3)
 
-class HospitalRegistrationSerializer(serializers.ModelSerializer):
+class HospitalRegistrationSerializer(SAPhoneFieldsMixin, serializers.ModelSerializer):
     # Three-step hospital registration.
     # Steps 1 & 2 are captured here. Step 3 (document upload) uses
     # InstitutionalDocumentSerializer after the account is created.
@@ -232,6 +251,7 @@ class HospitalRegistrationSerializer(serializers.ModelSerializer):
         ]
 
     def validate_email(self, value):
+        value = validate_email_format(value)
         _check_email_unique(value)
         return value
 
@@ -258,7 +278,7 @@ class HospitalRegistrationSerializer(serializers.ModelSerializer):
 
 # Ambulance service registration
 
-class AmbulanceRegistrationSerializer(serializers.ModelSerializer):
+class AmbulanceRegistrationSerializer(SAPhoneFieldsMixin, serializers.ModelSerializer):
     # Three-step ambulance service registration.
     # Account placed in PENDING state until MERA admin approves.
 
@@ -288,6 +308,7 @@ class AmbulanceRegistrationSerializer(serializers.ModelSerializer):
         ]
 
     def validate_email(self, value):
+        value = validate_email_format(value)
         _check_email_unique(value)
         return value
 
@@ -332,7 +353,7 @@ HOSPITAL_IDENTITY_FIELDS = [
 ]
 
 
-class HospitalAdminCreationSerializer(serializers.ModelSerializer):
+class HospitalAdminCreationSerializer(SAPhoneFieldsMixin, serializers.ModelSerializer):
     # Used by MERA admin to create a hospital_admin account directly.
     # No terms_consent (that's a self-registration artifact) and no
     # PENDING approval step — MERA already vetted the institution before
@@ -395,6 +416,7 @@ class HospitalAdminCreationSerializer(serializers.ModelSerializer):
         ]
 
     def validate_email(self, value):
+        value = validate_email_format(value)
         _check_email_unique(value)
         return value
 
@@ -447,7 +469,7 @@ AMBULANCE_IDENTITY_FIELDS = [
 ]
 
 
-class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
+class AmbulanceAdminCreationSerializer(SAPhoneFieldsMixin, serializers.ModelSerializer):
     # Used by MERA admin to create an ambulance_admin account directly.
     # Same reasoning as HospitalAdminCreationSerializer above.
     #
@@ -497,6 +519,7 @@ class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
         ]
 
     def validate_email(self, value):
+        value = validate_email_format(value)
         _check_email_unique(value)
         return value
 
@@ -540,7 +563,7 @@ class AmbulanceAdminCreationSerializer(serializers.ModelSerializer):
 
 # Ambulance Admin: create EMT account
 
-class EMTCreationSerializer(serializers.ModelSerializer):
+class EMTCreationSerializer(SAPhoneFieldsMixin, serializers.ModelSerializer):
     # Used by an ambulance_admin (or legacy ambulance_service) account to
     # create an EMT under their own service. No self-registration, no
     # approval queue — same reasoning as HospitalAdminCreationSerializer
@@ -563,6 +586,7 @@ class EMTCreationSerializer(serializers.ModelSerializer):
         ]
 
     def validate_email(self, value):
+        value = validate_email_format(value)
         _check_email_unique(value)
         return value
 
@@ -584,7 +608,7 @@ class EMTCreationSerializer(serializers.ModelSerializer):
 
 # Ambulance Admin: edit one of their own EMTs
 
-class EMTUpdateSerializer(serializers.ModelSerializer):
+class EMTUpdateSerializer(SAPhoneFieldsMixin, serializers.ModelSerializer):
     # Contact-detail edits only. Role is permanent (assigned at creation)
     # and password changes go through the password-reset flow, not this
     # endpoint, so neither field is listed here.
@@ -594,6 +618,7 @@ class EMTUpdateSerializer(serializers.ModelSerializer):
         fields = ["full_name", "phone_number", "email"]
 
     def validate_email(self, value):
+        value = validate_email_format(value)
         if User.objects.exclude(pk=self.instance.pk).filter(email=value).exists():
             raise serializers.ValidationError("An account with this email already exists.")
         return value
@@ -651,6 +676,11 @@ class InstitutionSummarySerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "display_name", "role", "email", "is_active", "institutional_status", "date_joined",
+            # Raw name fields for the shared Edit modal to prefill from —
+            # same reason AdminUserListSerializer carries them. Without
+            # these, editing an institution from the Institutions page
+            # prefilled its name blank and saving wiped it.
+            "facility_name", "service_name",
             # Required onboarding documents (see HospitalAdminCreationSerializer/
             # AmbulanceAdminCreationSerializer) — for MERA admin document
             # review. Whichever pair doesn't apply to this row's role is just
@@ -666,7 +696,7 @@ class InstitutionSummarySerializer(serializers.ModelSerializer):
 
 # MERA Admin: edit any user's basic info
 
-class AdminUserEditSerializer(serializers.ModelSerializer):
+class AdminUserEditSerializer(SAPhoneFieldsMixin, serializers.ModelSerializer):
     # PATCH /auth/admin/users/{id}/ — MERA admin editing any account's basic
     # contact/identity info. Deliberately excludes role (permanent after
     # creation everywhere else in this codebase too) and password (goes
@@ -682,9 +712,71 @@ class AdminUserEditSerializer(serializers.ModelSerializer):
         fields = ["full_name", "email", "phone_number", "facility_name", "service_name"]
 
     def validate_email(self, value):
+        value = validate_email_format(value)
         if User.objects.exclude(pk=self.instance.pk).filter(email=value).exists():
             raise serializers.ValidationError("An account with this email already exists.")
         return value
+
+# MERA Admin: upload / replace an institution's onboarding documents
+
+# Upload field → (User URL field, Cloudinary folder), per institution type.
+# Same field names the creation serializers take, so the web form reuses them.
+INSTITUTION_DOCUMENT_FIELDS = {
+    "hospital": {
+        "health_facility_certificate": ("health_facility_certificate_url", "institutional_documents/hospital"),
+        "cipc_registration_document": ("cipc_registration_url", "institutional_documents/hospital"),
+    },
+    "ambulance": {
+        "ems_operating_license": ("ems_operating_license_url", "institutional_documents/ambulance"),
+        "hpcsa_doh_registration_document": ("hpcsa_doh_registration_url", "institutional_documents/ambulance"),
+    },
+}
+
+
+class InstitutionDocumentsUpdateSerializer(serializers.Serializer):
+    # PATCH /auth/admin/institutions/{id}/documents/ — renew an expired
+    # document, or add ones an institution never had (accounts created
+    # before uploads became required at creation). Any subset of the
+    # account's own pair may be sent; each one sent replaces what's on file.
+
+    health_facility_certificate = serializers.FileField(required=False)
+    cipc_registration_document = serializers.FileField(required=False)
+    ems_operating_license = serializers.FileField(required=False)
+    hpcsa_doh_registration_document = serializers.FileField(required=False)
+
+    def validate(self, data):
+        institution = self.instance
+        if institution.role in HOSPITAL_ROLES:
+            allowed = INSTITUTION_DOCUMENT_FIELDS["hospital"]
+        elif institution.role in AMBULANCE_ROLES:
+            allowed = INSTITUTION_DOCUMENT_FIELDS["ambulance"]
+        else:
+            raise serializers.ValidationError(
+                {"detail": "Only hospital and ambulance service accounts have institutional documents."}
+            )
+        wrong_type = [name for name in data if name not in allowed]
+        if wrong_type:
+            raise serializers.ValidationError(
+                {name: "This document doesn't apply to this type of institution." for name in wrong_type}
+            )
+        if not data:
+            raise serializers.ValidationError(
+                {"detail": "Choose at least one document to upload."}
+            )
+        self._allowed = allowed
+        return data
+
+    def update(self, instance, validated_data):
+        # Upload everything first, then write once — a failed upload leaves
+        # every existing URL on file untouched.
+        new_urls = {
+            self._allowed[name][0]: _upload_institutional_document(file, folder=self._allowed[name][1])
+            for name, file in validated_data.items()
+        }
+        for field, url in new_urls.items():
+            setattr(instance, field, url)
+        instance.save(update_fields=list(new_urls))
+        return instance
 
 # MERA Admin: platform-wide account management table (every role)
 
@@ -706,6 +798,10 @@ class AdminUserListSerializer(serializers.ModelSerializer):
         fields = [
             "id", "display_name", "role", "email", "is_active", "institutional_status", "date_joined",
             "full_name", "phone_number", "facility_name", "service_name",
+            # So the shared Edit modal can show an institution's documents
+            # on file whichever page (Users or Institutions) it's opened from.
+            "health_facility_certificate_url", "cipc_registration_url",
+            "ems_operating_license_url", "hpcsa_doh_registration_url",
         ]
         read_only_fields = fields
 
@@ -844,6 +940,13 @@ class VerifyOTPSerializer(serializers.Serializer):
 
         otp.used = True
         otp.save(update_fields=["used"])
+        # A correct code proves the inbox is theirs — completes a pending
+        # registration, whether they're finishing it straight after
+        # registering or came back later via login.
+        data["registration_completed"] = not user.email_verified
+        if not user.email_verified:
+            user.email_verified = True
+            user.save(update_fields=["email_verified"])
         data["user"] = user
         return data
 

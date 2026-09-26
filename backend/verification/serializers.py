@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from accounts.models import HOSPITAL_ROLES, User
-from .models import VerificationRequest, VerificationRequestStatus
+from .models import VerificationRequest
+from .services import submit_to_hospital
 
 
 class VerificationRequestSerializer(serializers.ModelSerializer):
@@ -49,31 +50,7 @@ class SubmitVerificationRequestSerializer(serializers.Serializer):
         return value
 
     def save(self, patient):
-        from django.utils import timezone
-        from medical_profiles.models import VerificationStatus
-
-        # Mark any previous pending requests for this patient as withdrawn
-        VerificationRequest.objects.filter(
-            patient=patient,
-            status__in=[
-                VerificationRequestStatus.PENDING,
-                VerificationRequestStatus.INFO_REQUESTED,
-            ],
-        ).update(status=VerificationRequestStatus.WITHDRAWN)
-
-        request = VerificationRequest.objects.create(
-            patient=patient,
-            hospital=self._hospital,
-            status=VerificationRequestStatus.PENDING,
-            submitted_at=timezone.now(),
-        )
-
-        # Update the medical profile's verification status to Pending
-        profile = patient.medical_profile
-        profile.verification_status = VerificationStatus.PENDING
-        profile.save(update_fields=["verification_status", "updated_at"])
-
-        return request
+        return submit_to_hospital(patient, self._hospital)
 
 
 class HospitalQueueSerializer(serializers.ModelSerializer):
@@ -89,6 +66,12 @@ class HospitalQueueSerializer(serializers.ModelSerializer):
             "id", "status", "urgency_badge",
             "patient_name", "patient_id", "patient_age",
             "submitted_at", "hours_since_submission",
+            # Lets the queue tell "patient answered your request" apart
+            # from a first-time submission.
+            "patient_responded_at",
+            # When an info request was sent — "waiting since" for requests
+            # sitting with the patient.
+            "reviewed_at",
         ]
         read_only_fields = fields
 

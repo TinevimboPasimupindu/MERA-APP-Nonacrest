@@ -18,6 +18,7 @@ import {
 import { router } from 'expo-router';
 import { Colors, FontSizes, Spacing, BorderRadius } from '../../constants/theme';
 import { apiCall, ENDPOINTS } from '../../services/api';
+import { contactPhoneError } from '../../utils/validation';
 
 type Contact = {
   id: string;
@@ -50,7 +51,7 @@ export default function EmergencyContactsScreen() {
       const data = await apiCall(ENDPOINTS.emergencyContacts, 'GET', undefined, true);
       setContacts(Array.isArray(data) ? data : data.results ?? []);
     } catch (err: any) {
-      setError('Failed to load contacts. Tap retry to try again.');
+      setError(`${err?.detail || "Couldn't load your contacts."} Tap retry to load them again.`);
     } finally {
       setLoading(false);
     }
@@ -76,8 +77,8 @@ export default function EmergencyContactsScreen() {
           try {
             await apiCall(`${ENDPOINTS.emergencyContacts}${id}/`, 'DELETE', undefined, true);
             setContacts((prev) => prev.filter((c) => c.id !== id));
-          } catch {
-            Alert.alert('Error', 'Could not remove contact. Please try again.');
+          } catch (err: any) {
+            Alert.alert("Couldn't remove contact", err?.detail || 'The contact was not removed.');
           }
         },
       },
@@ -90,6 +91,14 @@ export default function EmergencyContactsScreen() {
 
     if (contacts.length >= 5) {
       Alert.alert('Limit Reached', 'You can only add up to 5 emergency contacts.');
+      return;
+    }
+
+    // Same rule the backend enforces — this number is what gets texted
+    // when an SOS fires, so catch a typo here rather than mid-emergency.
+    const phoneError = contactPhoneError(newPhone);
+    if (phoneError) {
+      Alert.alert('Check the phone number', phoneError);
       return;
     }
 
@@ -112,8 +121,8 @@ export default function EmergencyContactsScreen() {
       setNewRel('');
       setNewPhone('');
     } catch (err: any) {
-      const message = err?.non_field_errors?.[0] ?? err?.detail ?? 'Could not save contact. Please try again.';
-      Alert.alert('Error', message);
+      const message = err?.phone_number?.[0] ?? err?.non_field_errors?.[0] ?? err?.detail ?? 'Could not save contact. Please try again.';
+      Alert.alert("Couldn't save contact", message);
     } finally {
       setSaving(false);
     }

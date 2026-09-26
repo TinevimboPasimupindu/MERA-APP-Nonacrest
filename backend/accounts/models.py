@@ -94,6 +94,14 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     date_joined = models.DateTimeField(default=timezone.now)
 
+    # False only for a patient who self-registered with email/password and
+    # hasn't yet entered the OTP emailed at registration — no tokens are
+    # issued until they do (PatientRegisterView/VerifyOTPSerializer).
+    # Defaults True so every other creation path (admin-created accounts,
+    # Google sign-in, and every account that existed before this field)
+    # is unaffected.
+    email_verified = models.BooleanField(default=True)
+
     failed_login_attempts = models.PositiveSmallIntegerField(default=0)
     is_locked = models.BooleanField(default=False)
     locked_at = models.DateTimeField(null=True, blank=True)
@@ -111,6 +119,17 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Patient-specific fields
     full_name = models.CharField(max_length=255, blank=True, default="")
     phone_number = models.CharField(max_length=20, blank=True, default="")
+    # SA ID or passport number, captured at registration for identity
+    # verification / audit in case of a dispute or investigation. Validated
+    # by accounts/validators.py::normalize_id_or_passport. Blank for anyone
+    # who registered before it was collected — nothing requires it.
+    #
+    # SENSITIVE: stored in PLAINTEXT, a known accepted gap (see
+    # PROJECT_CONTEXT.md). First field to encrypt once field-level
+    # encryption exists. Deliberately in NO API serializer — only the Django
+    # admin shows it (read-only). Don't add it to any response without a
+    # specific need.
+    id_number = models.CharField(max_length=20, blank=True, default="")
     gender = models.CharField(
         max_length=20,
         blank=True,
