@@ -129,7 +129,6 @@ export default function Dashboard() {
               <thead>
                 <tr>
                   <th>Patient</th>
-                  <th>ETA</th>
                   <th>Condition</th>
                 </tr>
               </thead>
@@ -140,7 +139,6 @@ export default function Dashboard() {
                     onClick={() => navigate(`/hospital-admin/incoming/${item.id}`)}
                   >
                     <td>{item.patient_summary?.full_name || 'Unknown patient'}</td>
-                    <td className="mono">{item.eta_minutes != null ? `${item.eta_minutes} min` : '—'}</td>
                     <td>{item.patient_summary?.chronic_conditions || '—'}</td>
                   </tr>
                 ))}

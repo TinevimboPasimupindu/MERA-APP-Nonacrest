@@ -213,9 +213,6 @@ export default function HospitalPortal(): React.JSX.Element {
               key={incident.id}
               style={[styles.incomingCard, styles.incomingCardUrgent]}
             >
-              <Text style={[styles.etaText, { color: theme.colors.urgentEta }]}>
-                ETA  {incident.eta_minutes || '—'} min
-              </Text>
               <View style={styles.incomingCardBody}>
                 <View style={styles.incomingInfo}>
                   <Text style={styles.incomingName}>
@@ -418,12 +415,6 @@ const styles = StyleSheet.create({
   },
   incomingCardUrgent:  { backgroundColor: theme.colors.urgentBg,  borderColor: theme.colors.urgentBorder },
   incomingCardWarning: { backgroundColor: theme.colors.warningBg, borderColor: theme.colors.warningBorder },
-  etaText: {
-    fontSize:      theme.font.xs,
-    fontWeight:    '700',
-    marginBottom:  theme.spacing.sm,
-    letterSpacing: 0.5,
-  },
   incomingCardBody: { flexDirection: 'row', alignItems: 'center', gap: theme.spacing.sm },
   incomingInfo:     { flex: 1 },
   incomingName: {

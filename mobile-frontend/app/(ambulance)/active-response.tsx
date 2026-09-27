@@ -553,7 +553,7 @@ export default function ActiveResponse() {
             <ActivityIndicator color={Colors.white} />
           ) : (
             <Text style={styles.notifyButtonText}>
-              🏥 Notify {selectedHospital?.facility_name || 'Hospital'} — ETA 8 min
+              🏥 Notify {selectedHospital?.facility_name || 'Hospital'}
             </Text>
           )}
         </TouchableOpacity>

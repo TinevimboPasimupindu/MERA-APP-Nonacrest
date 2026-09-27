@@ -87,7 +87,8 @@ const IncomingPatientScreen: React.FC = () => {
         showsVerticalScrollIndicator={false}
       >
 
-        {/* Ambulance ETA banner */}
+        {/* Ambulance banner. No ETA: it can't account for on-scene
+            treatment time before departure, so it misled hospitals. */}
         <View style={styles.ambulanceBanner}>
           <View style={styles.ambulanceTopRow}>
             <View style={styles.ambulanceLiveDot} />
@@ -95,9 +96,6 @@ const IncomingPatientScreen: React.FC = () => {
               🚑  {ambulanceName}
             </Text>
           </View>
-          <Text style={styles.ambulanceMeta}>
-            ETA {incident?.eta_minutes || '—'} minutes
-          </Text>
           <Text style={styles.ambulanceStatus}>
             Status: <Text style={styles.ambulanceStatusValue}>
               {incident?.status?.replace(/_/g, ' ').toUpperCase() || '—'}
@@ -263,7 +261,6 @@ const styles = StyleSheet.create({
   ambulanceTopRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 4, gap: 8 },
   ambulanceLiveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: Colors.ambulanceLiveDot },
   ambulanceTitle: { color: Colors.textPrimary, fontSize: 15, fontWeight: '700' },
-  ambulanceMeta: { color: Colors.textSecondary, fontSize: 13, marginBottom: 4 },
   ambulanceStatus: { color: Colors.textMuted, fontSize: 13 },
   ambulanceStatusValue: { color: Colors.ambulanceLiveDot, fontWeight: '600' },
   identityCard: {
