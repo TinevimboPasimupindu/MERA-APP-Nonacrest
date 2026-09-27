@@ -858,6 +858,38 @@ class MERAAdminInstitutionsStatsUsersTest(TestCase):
         response = self.client.get(reverse("admin-institutions"))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_lists_forbidden_to_every_non_mera_role(self):
+        # These lists carry account holders' names and phone numbers, so
+        # institution admins (and everyone else) must be shut out of both.
+        ambulance_admin = User.objects.create_user(
+            email="amb-admin@example.com", password="pass", role=Role.AMBULANCE_ADMIN,
+        )
+        legacy_hospital = User.objects.create_user(
+            email="legacy-hosp@example.com", password="pass", role=Role.HOSPITAL,
+        )
+        for account in [self.hospital, legacy_hospital, self.ambulance, ambulance_admin, self.patient, self.emt]:
+            self.client.force_authenticate(user=account)
+            for url in [reverse("admin-users"), reverse("admin-institutions")]:
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN, (account.role, url))
+
+    def test_lists_carry_account_holder_contact(self):
+        self.hospital.admin_contact_name = "Naledi Dlamini"
+        self.hospital.admin_phone = "+27821234567"
+        self.hospital.save(update_fields=["admin_contact_name", "admin_phone"])
+        self.patient.phone_number = "+27831234567"
+        self.patient.save(update_fields=["phone_number"])
+
+        institutions = {row["id"]: row for row in self.client.get(reverse("admin-institutions")).data}
+        row = institutions[str(self.hospital.id)]
+        self.assertEqual(row["admin_contact_name"], "Naledi Dlamini")
+        self.assertEqual(row["admin_phone"], "+27821234567")
+
+        users = {row["id"]: row for row in self.client.get(reverse("admin-users")).data}
+        self.assertEqual(users[str(self.hospital.id)]["admin_phone"], "+27821234567")
+        self.assertEqual(users[str(self.patient.id)]["full_name"], "Test Patient")
+        self.assertEqual(users[str(self.patient.id)]["phone_number"], "+27831234567")
+
 
 class SearchAndSortTest(TestCase):
     # ?search= on institutions/users lists, and active-first ordering on the

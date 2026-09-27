@@ -45,15 +45,13 @@ export default function IncomingAmbulances() {
             const freshById = new Map((data || []).map((it) => [it.id, it]));
 
             // Keep every row exactly where it already is on screen, just
-            // refreshed with whatever the poll returned for it (ETA counts
-            // down, status badge updates, etc. all stay live) — and drop
-            // rows no longer in the incoming set (arrived/completed/
-            // cancelled). The backend sorts by eta_minutes, which changes
-            // constantly as ambulances get closer, so re-adopting that
-            // order wholesale on every poll would shuffle rows out from
-            // under a hospital admin mid-read. Brand-new incidents are
-            // appended at the end rather than inserted wherever their ETA
-            // would sort them, for the same reason — and briefly
+            // refreshed with whatever the poll returned for it (status
+            // badge updates etc. stay live) — and drop rows no longer in
+            // the incoming set (arrived/completed/cancelled). Re-adopting
+            // the backend's order wholesale on every poll would shuffle
+            // rows out from under a hospital admin mid-read. Brand-new
+            // incidents are appended at the end rather than inserted
+            // wherever the backend would sort them, for the same reason — and briefly
             // highlighted (see newIds below) so a newly-dispatched
             // ambulance doesn't just quietly land at the bottom unnoticed.
             const kept = prev
@@ -135,7 +133,10 @@ export default function IncomingAmbulances() {
       <div className="page-header spread">
         <div>
           <h1>Incoming ambulances</h1>
-          <p>Patients currently en route to your hospital, sorted by ETA.</p>
+          {/* No ETA shown to hospitals: it can't account for on-scene
+              treatment time before the ambulance departs, so it read as
+              far more precise than it was. */}
+          <p>Patients currently en route to your hospital.</p>
         </div>
         {refreshing && (
           <span style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
@@ -164,7 +165,6 @@ export default function IncomingAmbulances() {
               <tr>
                 <th>Patient</th>
                 <th>Status</th>
-                <th>ETA</th>
                 <th>Ambulance</th>
                 <th>Known allergies</th>
               </tr>
@@ -178,7 +178,6 @@ export default function IncomingAmbulances() {
                 >
                   <td>{item.patient_summary?.full_name || 'Unknown patient'}</td>
                   <td><StatusBadge status={item.status} /></td>
-                  <td className="mono">{item.eta_minutes != null ? `${item.eta_minutes} min` : '—'}</td>
                   <td>{item.ambulance_name || '—'}</td>
                   <td>{item.patient_summary?.known_allergies || '—'}</td>
                 </tr>

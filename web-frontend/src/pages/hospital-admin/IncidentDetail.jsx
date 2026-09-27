@@ -72,10 +72,7 @@ export default function IncidentDetail() {
             ← Back to incoming ambulances
           </button>
           <h1>{incident.patient_summary?.full_name || 'Unknown patient'}</h1>
-          <p>
-            {incident.ambulance_name ? `${incident.ambulance_name} · ` : ''}
-            ETA {incident.eta_minutes != null ? `${incident.eta_minutes} min` : 'unknown'}
-          </p>
+          {incident.ambulance_name && <p>{incident.ambulance_name}</p>}
         </div>
         <StatusBadge status={incident.status} />
       </div>

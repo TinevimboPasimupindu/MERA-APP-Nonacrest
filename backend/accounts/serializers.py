@@ -681,6 +681,11 @@ class InstitutionSummarySerializer(serializers.ModelSerializer):
             # these, editing an institution from the Institutions page
             # prefilled its name blank and saving wiped it.
             "facility_name", "service_name",
+            # Account holder's contact, as captured at onboarding — for the
+            # row-actions "Details" view, so a MERA admin can reach whoever
+            # runs the institution (flagged document, support issue). Only
+            # ever served by IsMERAAdmin-gated views.
+            "admin_contact_name", "admin_phone",
             # Required onboarding documents (see HospitalAdminCreationSerializer/
             # AmbulanceAdminCreationSerializer) — for MERA admin document
             # review. Whichever pair doesn't apply to this row's role is just
@@ -798,6 +803,9 @@ class AdminUserListSerializer(serializers.ModelSerializer):
         fields = [
             "id", "display_name", "role", "email", "is_active", "institutional_status", "date_joined",
             "full_name", "phone_number", "facility_name", "service_name",
+            # Institution account holder's contact (patients/EMTs use
+            # full_name/phone_number above) — see InstitutionSummarySerializer.
+            "admin_contact_name", "admin_phone",
             # So the shared Edit modal can show an institution's documents
             # on file whichever page (Users or Institutions) it's opened from.
             "health_facility_certificate_url", "cipc_registration_url",

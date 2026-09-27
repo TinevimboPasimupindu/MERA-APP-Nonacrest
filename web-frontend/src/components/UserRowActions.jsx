@@ -175,6 +175,75 @@ function EditUserModal({ user, onClose, onSaved }) {
   );
 }
 
+const ROLE_LABELS = {
+  patient: 'Patient',
+  hospital: 'Hospital (legacy)',
+  hospital_admin: 'Hospital Admin',
+  ambulance_service: 'Ambulance (legacy)',
+  ambulance_admin: 'Ambulance Admin',
+  emt: 'EMT',
+  mera_admin: 'MERA Admin',
+};
+
+// Who to contact about this account, from the fields filled in at
+// onboarding: institutions record an admin contact (admin_contact_name/
+// admin_phone); patients, EMTs and MERA admins are the account holder
+// themselves (full_name/phone_number). Read-only — the list serializers
+// behind both pages are MERA-admin-only on the backend.
+function contactForUser(user) {
+  if (HOSPITAL_ROLE_SET.has(user.role) || AMBULANCE_ROLE_SET.has(user.role)) {
+    return { name: user.admin_contact_name, phone: user.admin_phone };
+  }
+  return { name: user.full_name, phone: user.phone_number };
+}
+
+function DetailsModal({ user, onClose }) {
+  const contact = contactForUser(user);
+  const isInstitution = HOSPITAL_ROLE_SET.has(user.role) || AMBULANCE_ROLE_SET.has(user.role);
+  const rows = [
+    { label: isInstitution ? 'Institution' : 'Account', value: user.display_name },
+    { label: 'Role', value: ROLE_LABELS[user.role] || user.role },
+    { label: isInstitution ? 'Account holder (admin contact)' : 'Account holder', value: contact.name },
+    {
+      label: 'Phone',
+      value: contact.phone && (
+        <a href={`tel:${contact.phone}`} style={{ color: COLORS.accent }}>{contact.phone}</a>
+      ),
+    },
+    {
+      label: 'Email',
+      value: user.email && (
+        <a href={`mailto:${user.email}`} style={{ color: COLORS.accent }}>{user.email}</a>
+      ),
+    },
+  ];
+
+  return (
+    <div style={overlayStyle} onClick={onClose}>
+      <div style={panelStyle} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: COLORS.ink }}>
+            {user.display_name || user.email}
+          </h2>
+          <button type="button" onClick={onClose} style={closeBtnStyle}>Close</button>
+        </div>
+        {rows.map((r) => (
+          <div key={r.label} style={{ marginBottom: 14 }}>
+            <div style={labelStyle}>{r.label}</div>
+            <div style={{ fontSize: 13.5, color: r.value ? COLORS.ink : COLORS.inkMuted }}>
+              {r.value || 'Not provided'}
+            </div>
+          </div>
+        ))}
+        <p style={{ fontSize: 11.5, color: COLORS.inkMuted, margin: '6px 0 0', lineHeight: 1.5 }}>
+          For MERA platform administrators only, to follow up with this account holder
+          (e.g. a flagged document or a support issue). Don&apos;t share it outside MERA.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // Three-dot actions menu shared by Users.jsx and Institutions.jsx — both
 // pages act on the same underlying accounts via the same
 // PATCH /auth/admin/users/{id}/[deactivate|reactivate|] endpoints, just
@@ -191,6 +260,7 @@ export default function UserRowActions({ user, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [editing, setEditing] = useState(false);
+  const [viewingDetails, setViewingDetails] = useState(false);
   const ref = useRef(null);
 
   useEffect(() => {
@@ -270,6 +340,9 @@ export default function UserRowActions({ user, onChanged }) {
         </button>
         {open && (
           <div style={menuDropdownStyle}>
+            <button type="button" style={menuItemStyle} onClick={() => { setOpen(false); setViewingDetails(true); }}>
+              Details
+            </button>
             <button type="button" style={menuItemStyle} onClick={() => { setOpen(false); setEditing(true); }}>
               Edit
             </button>
@@ -311,6 +384,8 @@ export default function UserRowActions({ user, onChanged }) {
         )}
       </div>
       {error && <div style={{ color: COLORS.red, fontSize: 11.5, marginTop: 4 }}>{error}</div>}
+
+      {viewingDetails && <DetailsModal user={user} onClose={() => setViewingDetails(false)} />}
 
       {editing && (
         <EditUserModal
