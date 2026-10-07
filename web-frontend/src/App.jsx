@@ -22,6 +22,7 @@ import MeraDashboard from './pages/mera-admin/Dashboard'
 import Institutions from './pages/mera-admin/Institutions'
 import Users from './pages/mera-admin/Users'
 import NFCTags from './pages/mera-admin/NFCTags'
+import { IncidentHistoryList, IncidentHistoryDetail } from './pages/shared/IncidentHistory'
 import './App.css'
 
 function App() {
@@ -49,6 +50,8 @@ function App() {
             <Route path="incoming/:id" element={<IncidentDetail />} />
             <Route path="patients" element={<Patients />} />
             <Route path="patients/:patientId" element={<UpdatePatientRecords />} />
+            <Route path="incidents" element={<IncidentHistoryList basePath="/hospital-admin/incidents" />} />
+            <Route path="incidents/:id" element={<IncidentHistoryDetail basePath="/hospital-admin/incidents" />} />
           </Route>
 
           <Route
@@ -61,6 +64,8 @@ function App() {
           >
             <Route index element={<AmbulanceDashboard />} />
             <Route path="emts" element={<EmtManagement />} />
+            <Route path="incidents" element={<IncidentHistoryList basePath="/ambulance-admin/incidents" />} />
+            <Route path="incidents/:id" element={<IncidentHistoryDetail basePath="/ambulance-admin/incidents" />} />
           </Route>
 
           <Route
@@ -75,6 +80,8 @@ function App() {
             <Route path="institutions" element={<Institutions />} />
             <Route path="users" element={<Users />} />
             <Route path="nfc-tags" element={<NFCTags />} />
+            <Route path="incidents" element={<IncidentHistoryList basePath="/mera-admin/incidents" />} />
+            <Route path="incidents/:id" element={<IncidentHistoryDetail basePath="/mera-admin/incidents" />} />
           </Route>
 
           <Route path="*" element={<Navigate to="/login" replace />} />

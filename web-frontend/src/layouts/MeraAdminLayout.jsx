@@ -7,6 +7,7 @@ const NAV = [
   { to: '/mera-admin/institutions', label: 'Institutions' },
   { to: '/mera-admin/users', label: 'Users' },
   { to: '/mera-admin/nfc-tags', label: 'NFC Tags' },
+  { to: '/mera-admin/incidents', label: 'Incidents' },
 ];
 
 export default function MeraAdminLayout() {
