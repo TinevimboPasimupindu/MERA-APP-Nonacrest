@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { apiCall, ENDPOINTS } from '../../services/api';
 import StatusBadge from '../../components/StatusBadge';
 import UserRowActions from '../../components/UserRowActions';
+import { useUrlFilter } from '../../utils/useUrlFilter';
 
 // Dark theme + accent colors — same self-contained-COLORS approach as
 // ambulance-admin/EmtManagement.jsx, but 'accent' is the shared --mera-accent
@@ -26,6 +27,13 @@ const ROLE_LABELS = {
   ambulance_admin: 'Ambulance Admin',
   emt: 'EMT',
   mera_admin: 'MERA Admin',
+};
+
+// ?role= filters, reachable from the dashboard tiles. Matches what
+// PlatformStatsView counts for those tiles: one role each, active only.
+const ROLE_FILTERS = {
+  patient: { label: 'Patients', roles: new Set(['patient']) },
+  emt: { label: 'EMTs', roles: new Set(['emt']) },
 };
 
 function RoleBadge({ role }) {
@@ -60,6 +68,8 @@ export default function Users() {
   const [error, setError] = useState(null);
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
+  const [roleFilter, setRoleFilter] = useUrlFilter('role', ROLE_FILTERS);
+  const [showDeactivated, setShowDeactivated] = useState(false);
 
   // Debounce the search box — wait for typing to pause before hitting the
   // API, same pattern as hospital-admin/Patients.jsx.
@@ -88,6 +98,12 @@ export default function Users() {
     setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, ...patch } : u)));
   };
 
+  // Filtered at render time from the full list, so a row deactivated or
+  // reactivated here (patchUser) moves in or out of view straight away.
+  const visibleUsers = roleFilter
+    ? users.filter((u) => ROLE_FILTERS[roleFilter].roles.has(u.role) && (showDeactivated || u.is_active !== false))
+    : users;
+
   return (
     <div style={{ padding: '24px 28px' }}>
       <div style={{ marginBottom: 20 }}>
@@ -97,7 +113,7 @@ export default function Users() {
         </p>
       </div>
 
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
         <input
           type="text"
           placeholder="Search by name or email…"
@@ -105,15 +121,37 @@ export default function Users() {
           onChange={(e) => setSearchInput(e.target.value)}
           style={{ ...inputStyle, maxWidth: 360 }}
         />
+        <select
+          value={roleFilter}
+          onChange={(e) => setRoleFilter(e.target.value)}
+          aria-label="Filter by role"
+          style={{ ...inputStyle, width: 'auto' }}
+        >
+          <option value="">All roles</option>
+          {Object.entries(ROLE_FILTERS).map(([key, f]) => (
+            <option key={key} value={key}>{f.label}</option>
+          ))}
+        </select>
+        {roleFilter && (
+          <label style={{ ...mutedText, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={showDeactivated} onChange={(e) => setShowDeactivated(e.target.checked)} />
+            Show deactivated
+          </label>
+        )}
+        {roleFilter && !loading && !error && (
+          <span style={mutedText}>{visibleUsers.length} shown</span>
+        )}
       </div>
 
       <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: 'hidden', boxShadow: SHADOW.card }}>
         {loading && <p style={{ padding: 28, ...mutedText }}>Loading…</p>}
         {error && <p style={{ padding: 28, ...mutedText, color: COLORS.red }}>{error}</p>}
-        {!loading && !error && users.length === 0 && (
-          <p style={{ padding: 28, ...mutedText }}>{search ? 'No accounts match that search.' : 'No accounts found.'}</p>
+        {!loading && !error && visibleUsers.length === 0 && (
+          <p style={{ padding: 28, ...mutedText }}>
+            {search ? 'No accounts match that search.' : roleFilter ? `No ${showDeactivated ? '' : 'active '}${ROLE_FILTERS[roleFilter].label.toLowerCase()} found.` : 'No accounts found.'}
+          </p>
         )}
-        {!loading && !error && users.length > 0 && (
+        {!loading && !error && visibleUsers.length > 0 && (
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr>
@@ -123,7 +161,7 @@ export default function Users() {
               </tr>
             </thead>
             <tbody>
-              {users.map((u) => {
+              {visibleUsers.map((u) => {
                 const isInactive = u.is_active === false;
                 return (
                   <tr key={u.id} className="mera-row" style={{ borderBottom: `1px solid ${COLORS.border}` }}>

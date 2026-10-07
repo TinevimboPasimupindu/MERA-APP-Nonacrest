@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { apiCall, ENDPOINTS } from '../../services/api';
 import { IncidentHistorySection } from '../shared/IncidentHistory';
 
@@ -16,14 +17,24 @@ const COLORS = {
 };
 
 // GET /auth/admin/stats/ returns these five counts (see accounts/views.py
-// PlatformStatsView) — key order here is the display order.
+// PlatformStatsView) — key order here is the display order. `to` opens the
+// list behind a count; those lists show active accounts only when filtered,
+// matching how the stats count them. Incidents has no link: its list is the
+// section below the tiles.
 const STAT_FIELDS = [
-  { key: 'total_patients', label: 'Patients' },
-  { key: 'total_hospitals', label: 'Hospitals' },
-  { key: 'total_ambulance_services', label: 'Ambulance services' },
-  { key: 'total_emts', label: 'EMTs' },
+  { key: 'total_patients', label: 'Patients', to: '/mera-admin/users?role=patient' },
+  { key: 'total_hospitals', label: 'Hospitals', to: '/mera-admin/institutions?type=hospital' },
+  { key: 'total_ambulance_services', label: 'Ambulance services', to: '/mera-admin/institutions?type=ambulance' },
+  { key: 'total_emts', label: 'EMTs', to: '/mera-admin/users?role=emt' },
   { key: 'total_incidents', label: 'Incidents (all time)' },
 ];
+
+const TILE_STYLE = {
+  background: COLORS.panel,
+  border: `1px solid ${COLORS.border}`,
+  borderRadius: 14,
+  padding: 20,
+};
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
@@ -65,27 +76,43 @@ export default function Dashboard() {
       ) : (
         stats && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
-            {STAT_FIELDS.map((f) => (
-              <div
-                key={f.key}
-                style={{
-                  background: COLORS.panel,
-                  border: `1px solid ${COLORS.border}`,
-                  borderRadius: 14,
-                  padding: 20,
-                }}
-              >
-                <div style={{ fontSize: '2rem', fontWeight: 700, color: COLORS.accent }}>
-                  {stats[f.key] ?? '—'}
+            {STAT_FIELDS.map((f) => {
+              const content = (
+                <>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: COLORS.accent }}>
+                    {stats[f.key] ?? '—'}
+                  </div>
+                  <div style={{ color: COLORS.inkMuted, fontSize: '0.85rem', marginTop: 4 }}>{f.label}</div>
+                </>
+              );
+              return f.to ? (
+                <Link
+                  key={f.key}
+                  to={f.to}
+                  className="mera-stat-link"
+                  aria-label={`${f.label}: ${stats[f.key] ?? 'unknown'}. Open the list`}
+                  style={{ ...TILE_STYLE, display: 'block', textDecoration: 'none' }}
+                >
+                  {content}
+                </Link>
+              ) : (
+                <div key={f.key} style={TILE_STYLE}>
+                  {content}
                 </div>
-                <div style={{ color: COLORS.inkMuted, fontSize: '0.85rem', marginTop: 4 }}>{f.label}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )
       )}
 
       <IncidentHistorySection searchPlaceholder="Search by incident #, ambulance service, EMT or hospital" />
+
+      {/* !important: the tile's own border/background are inline styles. */}
+      <style>{`
+        .mera-stat-link { transition: border-color 0.15s, background 0.15s; }
+        .mera-stat-link:hover { border-color: var(--mera-accent) !important; background: #4a4c66 !important; }
+        .mera-stat-link:focus-visible { outline: 2px solid var(--mera-accent); outline-offset: 3px; }
+      `}</style>
     </div>
   );
 }
