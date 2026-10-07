@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiCall, ENDPOINTS } from '../../services/api';
 import DashboardShell from '../../components/DashboardShell';
+import { IncidentHistorySection } from '../shared/IncidentHistory';
 
 // Dark theme + accent colors — same palette as EmtManagement.jsx.
 // 'accent' is Colors.ambulance (#F2731A) from the mobile app's
@@ -76,6 +77,8 @@ export default function Dashboard() {
           ))}
         </div>
       )}
+
+      <IncidentHistorySection searchPlaceholder="Search by incident #, EMT or hospital" />
     </DashboardShell>
   );
 }
