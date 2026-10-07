@@ -51,8 +51,11 @@ export const ENDPOINTS = {
   nfcTagVoid: (id) => `/nfc-tags/${id}/void/`,
 
   // Incident history: all three web dashboards (pages/shared/IncidentHistory.jsx)
-  incidentHistory: ({ page = 1, status = '' } = {}) =>
-    `/incidents/history/?${new URLSearchParams(status ? { page, status } : { page })}`,
+  // Empty filters are left out of the query string.
+  incidentHistory: (params = {}) =>
+    `/incidents/history/?${new URLSearchParams(
+      Object.entries({ page: 1, ...params }).filter(([, value]) => value !== '' && value != null)
+    )}`,
   incidentHistoryDetail: (id) => `/incidents/${id}/history_detail/`,
 
   // Public, unauthenticated bystander flow (no auth token sent — see

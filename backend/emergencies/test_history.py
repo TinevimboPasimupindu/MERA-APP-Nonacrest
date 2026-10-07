@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from django.db import connection
 from django.test import TestCase
@@ -191,8 +193,11 @@ class IncidentHistoryTest(TestCase):
 
     def test_query_count_does_not_grow_with_incidents(self):
         api = self.client_for(self.service_a)
+        search = {"q": "Sipho", "status": "completed", "date_from": "2000-01-01"}
         with CaptureQueriesContext(connection) as before:
             api.get(LIST_URL)
+        with CaptureQueriesContext(connection) as before_search:
+            api.get(LIST_URL, search)
         for _ in range(5):
             incident = Incident.objects.create(
                 patient=self.patient, ambulance_service=self.service_a,
@@ -204,3 +209,141 @@ class IncidentHistoryTest(TestCase):
             response = api.get(LIST_URL)
         self.assertEqual(response.data["count"], 6)
         self.assertEqual(len(after), len(before))
+        with CaptureQueriesContext(connection) as after_search:
+            response = api.get(LIST_URL, search)
+        self.assertEqual(response.data["count"], 6)
+        self.assertEqual(len(after_search), len(before_search))
+
+
+SAST = ZoneInfo("Africa/Johannesburg")
+
+
+class IncidentHistorySearchTest(TestCase):
+    # ?q=, ?date_from=, ?date_to= on /incidents/history/. Separate fixtures
+    # from IncidentHistoryTest so its exact-count assertions stay untouched.
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.patient = make_user(
+            "zanele@test.com", Role.PATIENT, full_name="Zanele Patient", phone_number="0821234567",
+        )
+        cls.service_a = make_user("a@test.com", Role.AMBULANCE_ADMIN, service_name="Alpha EMS")
+        cls.service_b = make_user("b@test.com", Role.AMBULANCE_ADMIN, service_name="Bravo EMS")
+        cls.emt_a = make_user("emt-a@test.com", Role.EMT, full_name="Sipho Medic", ambulance_service=cls.service_a)
+        cls.emt_b = make_user("emt-b@test.com", Role.EMT, full_name="Lerato Khumalo", ambulance_service=cls.service_b)
+        cls.hospital_1 = make_user("h1@test.com", Role.HOSPITAL_ADMIN, facility_name="City Hospital")
+        cls.hospital_2 = make_user("h2@test.com", Role.HOSPITAL_ADMIN, facility_name="Town Hospital")
+        cls.mera_admin = make_user("admin@test.com", Role.MERA_ADMIN)
+
+        def incident(service, hospital, state, when, accepted_by):
+            inc = Incident.objects.create(
+                patient=cls.patient, ambulance_service=service, destination_hospital=hospital,
+                status=state, triggered_at=when,
+            )
+            EmergencyLog.objects.create(incident=inc, event_type="ambulance_accepted", actor=accepted_by)
+            return inc
+
+        cls.inc1 = incident(cls.service_a, cls.hospital_1, IncidentStatus.COMPLETED,
+                            datetime(2026, 3, 10, 12, 0, tzinfo=SAST), cls.emt_a)
+        cls.inc2 = incident(cls.service_b, cls.hospital_2, IncidentStatus.COMPLETED,
+                            datetime(2026, 3, 15, 8, 0, tzinfo=SAST), cls.emt_b)
+        # 23:30 in Johannesburg is 21:30 UTC on the same day; date filters use
+        # the project time zone, so this incident belongs to 20 March.
+        cls.inc3 = incident(cls.service_a, cls.hospital_2, IncidentStatus.CANCELLED,
+                            datetime(2026, 3, 20, 23, 30, tzinfo=SAST), cls.service_a)
+
+    def search(self, user, **params):
+        api = APIClient()
+        api.force_authenticate(user)
+        return api.get(LIST_URL, params)
+
+    def ids(self, user, **params):
+        response = self.search(user, **params)
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        return {row["id"] for row in response.data["results"]}
+
+    def as_ids(self, *incidents):
+        return {str(i.id) for i in incidents}
+
+    # q matches
+
+    def test_q_matches_incident_id_prefix_and_full_id(self):
+        short = str(self.inc1.id)[:8].upper()
+        self.assertEqual(self.ids(self.mera_admin, q=short), self.as_ids(self.inc1))
+        self.assertEqual(self.ids(self.mera_admin, q=str(self.inc1.id)), self.as_ids(self.inc1))
+
+    def test_q_matches_service_name(self):
+        self.assertEqual(self.ids(self.mera_admin, q="bravo"), self.as_ids(self.inc2))
+
+    def test_q_matches_responding_emt_name(self):
+        self.assertEqual(self.ids(self.mera_admin, q="sipho"), self.as_ids(self.inc1))
+        self.assertEqual(self.ids(self.mera_admin, q="KHUMALO"), self.as_ids(self.inc2))
+
+    def test_q_matches_hospital_name(self):
+        self.assertEqual(self.ids(self.mera_admin, q="town"), self.as_ids(self.inc2, self.inc3))
+
+    # Scope
+
+    def test_q_never_leaves_ambulance_scope(self):
+        self.assertEqual(self.ids(self.service_a, q="Khumalo"), set())
+        self.assertEqual(self.ids(self.service_a, q="Bravo"), set())
+        self.assertEqual(self.ids(self.service_a, q=str(self.inc2.id)[:8]), set())
+        self.assertEqual(self.ids(self.service_a, q="town"), self.as_ids(self.inc3))
+
+    def test_q_never_leaves_hospital_scope(self):
+        self.assertEqual(self.ids(self.hospital_1, q="Town"), set())
+        self.assertEqual(self.ids(self.hospital_1, q="Lerato"), set())
+        self.assertEqual(self.ids(self.hospital_1, q=str(self.inc2.id)[:8]), set())
+        self.assertEqual(self.ids(self.hospital_2, q="Alpha"), self.as_ids(self.inc3))
+
+    def test_search_results_are_always_a_subset_of_the_unfiltered_list(self):
+        users = [self.service_a, self.service_b, self.hospital_1, self.hospital_2,
+                 self.mera_admin, self.emt_a, self.patient]
+        queries = ["a", "ems", "hospital", "sipho", "lerato", str(self.inc2.id)[:4]]
+        for user in users:
+            visible = self.ids(user)
+            for q in queries:
+                self.assertLessEqual(self.ids(user, q=q), visible, (user.email, q))
+
+    def test_patient_details_are_not_searchable(self):
+        for user in (self.mera_admin, self.service_a, self.hospital_1):
+            for q in ("Zanele", "zanele@test.com", "0821234567"):
+                self.assertEqual(self.ids(user, q=q), set(), (user.email, q))
+
+    def test_mera_admin_keys_unchanged_when_searching(self):
+        response = self.search(self.mera_admin, q="ems", date_from="2026-01-01")
+        self.assertTrue(response.data["results"])
+        for row in response.data["results"]:
+            self.assertEqual(set(row), ADMIN_KEYS)
+
+    # Dates
+
+    def test_date_bounds_are_inclusive(self):
+        self.assertEqual(self.ids(self.mera_admin, date_from="2026-03-15"), self.as_ids(self.inc2, self.inc3))
+        self.assertEqual(self.ids(self.mera_admin, date_to="2026-03-15"), self.as_ids(self.inc1, self.inc2))
+        self.assertEqual(
+            self.ids(self.mera_admin, date_from="2026-03-20", date_to="2026-03-20"), self.as_ids(self.inc3),
+        )
+
+    def test_invalid_dates_are_rejected(self):
+        cases = (
+            {"date_from": "2026-13-01"},
+            {"date_to": "15/03/2026"},
+            {"date_from": "yesterday"},
+            {"date_from": "2026-03-20", "date_to": "2026-03-10"},
+        )
+        for params in cases:
+            response = self.search(self.mera_admin, **params)
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, params)
+
+    # Combined
+
+    def test_status_q_and_dates_combine(self):
+        self.assertEqual(
+            self.ids(self.mera_admin, status="completed", q="ems", date_from="2026-03-12"),
+            self.as_ids(self.inc2),
+        )
+        self.assertEqual(
+            self.ids(self.service_a, status="cancelled", q="town", date_to="2026-03-31"),
+            self.as_ids(self.inc3),
+        )

@@ -5,7 +5,6 @@ import logo from '../assets/mera-logo.png';
 const NAV = [
   { to: '/ambulance-admin', label: 'Dashboard', end: true },
   { to: '/ambulance-admin/emts', label: 'EMT Management' },
-  { to: '/ambulance-admin/incidents', label: 'Incidents' },
 ];
 
 export default function AmbulanceAdminLayout() {

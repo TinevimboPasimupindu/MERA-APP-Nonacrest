@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiCall, ENDPOINTS } from '../../services/api';
+import { IncidentHistorySection } from '../shared/IncidentHistory';
 
 // Dark theme + accent colors — self-contained COLORS object, same approach
 // as ambulance-admin/Dashboard.jsx. 'accent' pulls the shared --mera-accent
@@ -83,6 +84,8 @@ export default function Dashboard() {
           </div>
         )
       )}
+
+      <IncidentHistorySection searchPlaceholder="Search by incident #, ambulance service, EMT or hospital" />
     </div>
   );
 }

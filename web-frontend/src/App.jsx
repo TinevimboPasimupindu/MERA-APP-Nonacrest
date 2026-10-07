@@ -50,7 +50,15 @@ function App() {
             <Route path="incoming/:id" element={<IncidentDetail />} />
             <Route path="patients" element={<Patients />} />
             <Route path="patients/:patientId" element={<UpdatePatientRecords />} />
-            <Route path="incidents" element={<IncidentHistoryList basePath="/hospital-admin/incidents" />} />
+            <Route
+              path="incidents"
+              element={
+                <IncidentHistoryList
+                  basePath="/hospital-admin/incidents"
+                  searchPlaceholder="Search by incident #, service or EMT"
+                />
+              }
+            />
             <Route path="incidents/:id" element={<IncidentHistoryDetail basePath="/hospital-admin/incidents" />} />
           </Route>
 
@@ -64,8 +72,8 @@ function App() {
           >
             <Route index element={<AmbulanceDashboard />} />
             <Route path="emts" element={<EmtManagement />} />
-            <Route path="incidents" element={<IncidentHistoryList basePath="/ambulance-admin/incidents" />} />
-            <Route path="incidents/:id" element={<IncidentHistoryDetail basePath="/ambulance-admin/incidents" />} />
+            {/* Incidents now live on the dashboard; old links land there. */}
+            <Route path="incidents/*" element={<Navigate to="/ambulance-admin" replace />} />
           </Route>
 
           <Route
@@ -80,8 +88,8 @@ function App() {
             <Route path="institutions" element={<Institutions />} />
             <Route path="users" element={<Users />} />
             <Route path="nfc-tags" element={<NFCTags />} />
-            <Route path="incidents" element={<IncidentHistoryList basePath="/mera-admin/incidents" />} />
-            <Route path="incidents/:id" element={<IncidentHistoryDetail basePath="/mera-admin/incidents" />} />
+            {/* Incidents now live on the dashboard; old links land there. */}
+            <Route path="incidents/*" element={<Navigate to="/mera-admin" replace />} />
           </Route>
 
           <Route path="*" element={<Navigate to="/login" replace />} />

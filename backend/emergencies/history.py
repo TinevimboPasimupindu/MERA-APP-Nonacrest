@@ -1,7 +1,8 @@
 # Read-only incident history for the web dashboards (ambulance admin,
 # hospital, MERA admin).
 #
-#   GET /incidents/history/                 paginated, optional ?status=
+#   GET /incidents/history/                 paginated; optional ?status=,
+#                                           ?q=, ?date_from=, ?date_to=
 #   GET /incidents/<uuid>/history_detail/
 #
 # Deliberately additive: no migrations and no changes to the existing
@@ -16,7 +17,11 @@
 # allergies) never appears here for any role; nothing below reads
 # patient.medical_profile.
 
-from django.db.models import Prefetch
+import re
+from datetime import date
+
+from django.db.models import CharField, Exists, OuterRef, Prefetch, Q
+from django.db.models.functions import Cast
 from rest_framework import generics, permissions, serializers
 from rest_framework.exceptions import ValidationError
 
@@ -128,16 +133,73 @@ class _HistoryMixin:
         return history_queryset(self.request.user)
 
 
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# A fragment of an incident id as the dashboards show it (the first 8 hex
+# characters, upper-case) or as a pasted full UUID.
+_ID_FRAGMENT = re.compile(r"^[0-9a-fA-F-]{4,36}$")
+
+
+def _parse_date(params, name):
+    raw = params.get(name)
+    if not raw:
+        return None
+    try:
+        if not _ISO_DATE.match(raw):
+            raise ValueError
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise ValidationError({name: f"Invalid date '{raw}'. Use YYYY-MM-DD."})
+
+
+def search_filter(q):
+    # Matches the incident id prefix, the ambulance service name, the
+    # responding EMT's name (the actor on the ambulance_accepted log entry,
+    # same source as responding_emt()) and the hospital name. Patient fields
+    # are deliberately not searchable. Callers apply this to the already
+    # role-scoped queryset, so it can only ever narrow what the user sees.
+    emt_matches = EmergencyLog.objects.filter(
+        incident=OuterRef("pk"),
+        event_type="ambulance_accepted",
+        actor__role=Role.EMT,
+        actor__full_name__icontains=q,
+    )
+    match = (
+        Q(ambulance_service__service_name__icontains=q)
+        | Q(destination_hospital__facility_name__icontains=q)
+        | Exists(emt_matches)
+    )
+    if _ID_FRAGMENT.match(q):
+        match |= Q(id_text__istartswith=q)
+    return match
+
+
 class IncidentHistoryListView(_HistoryMixin, generics.ListAPIView):
     # Paginated by the project default (PageNumberPagination, PAGE_SIZE 20).
+    # Every filter below is applied to the role-scoped queryset from
+    # history_queryset(), never around it.
 
     def get_queryset(self):
         qs = super().get_queryset()
-        wanted = self.request.query_params.get("status")
+        params = self.request.query_params
+
+        wanted = params.get("status")
         if wanted:
             if wanted not in IncidentStatus.values:
                 raise ValidationError({"status": f"Unknown status '{wanted}'."})
             qs = qs.filter(status=wanted)
+
+        date_from = _parse_date(params, "date_from")
+        date_to = _parse_date(params, "date_to")
+        if date_from and date_to and date_from > date_to:
+            raise ValidationError({"date_from": "date_from must be on or before date_to."})
+        if date_from:
+            qs = qs.filter(triggered_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(triggered_at__date__lte=date_to)
+
+        q = params.get("q", "").strip()
+        if q:
+            qs = qs.annotate(id_text=Cast("id", output_field=CharField())).filter(search_filter(q))
         return qs
 
 
