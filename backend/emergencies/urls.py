@@ -1,6 +1,7 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
+from .history import IncidentHistoryDetailView, IncidentHistoryListView
 from .views import (
     IncidentViewSet,
     NFCTagGenerateView,
@@ -15,7 +16,17 @@ from .views import (
 router = DefaultRouter()
 router.register(r"incidents", IncidentViewSet, basename="incident")
 
-urlpatterns = router.urls + [
+urlpatterns = [
+    # Read-only incident history for the web dashboards (see history.py).
+    # Listed before router.urls so the router's incidents/{pk}/ pattern can
+    # never capture "history" as a pk.
+    path("incidents/history/", IncidentHistoryListView.as_view(), name="incident-history"),
+    path(
+        "incidents/<uuid:incident_id>/history_detail/",
+        IncidentHistoryDetailView.as_view(),
+        name="incident-history-detail",
+    ),
+] + router.urls + [
     # MERA admin — NFC tag inventory management
     path("nfc-tags/generate/", NFCTagGenerateView.as_view(), name="nfc-tags-generate"),
     path("nfc-tags/", NFCTagListView.as_view(), name="nfc-tags-list"),

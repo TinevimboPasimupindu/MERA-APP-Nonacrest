@@ -7,6 +7,7 @@ const NAV = [
   { to: '/hospital-admin/verification-queue', label: 'Verification queue' },
   { to: '/hospital-admin/incoming', label: 'Incoming ambulances' },
   { to: '/hospital-admin/patients', label: 'Patients' },
+  { to: '/hospital-admin/incidents', label: 'Incidents' },
 ];
 
 export default function HospitalAdminLayout() {

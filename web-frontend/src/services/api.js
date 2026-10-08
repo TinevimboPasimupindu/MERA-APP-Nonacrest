@@ -50,6 +50,14 @@ export const ENDPOINTS = {
   nfcTagUnpair: (id) => `/nfc-tags/${id}/unpair/`,
   nfcTagVoid: (id) => `/nfc-tags/${id}/void/`,
 
+  // Incident history: all three web dashboards (pages/shared/IncidentHistory.jsx)
+  // Empty filters are left out of the query string.
+  incidentHistory: (params = {}) =>
+    `/incidents/history/?${new URLSearchParams(
+      Object.entries({ page: 1, ...params }).filter(([, value]) => value !== '' && value != null)
+    )}`,
+  incidentHistoryDetail: (id) => `/incidents/${id}/history_detail/`,
+
   // Public, unauthenticated bystander flow (no auth token sent — see
   // apiCall's requiresAuth param)
   nfcTagStatus: (token) => `/nfc/${token}/`,

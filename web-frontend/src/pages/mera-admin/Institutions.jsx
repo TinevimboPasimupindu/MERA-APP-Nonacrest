@@ -3,6 +3,7 @@ import { apiCall, ENDPOINTS } from '../../services/api';
 import { formFormatError } from '../../utils/validation';
 import StatusBadge from '../../components/StatusBadge';
 import UserRowActions from '../../components/UserRowActions';
+import { useUrlFilter } from '../../utils/useUrlFilter';
 
 // Dark theme + accent colors — same self-contained-COLORS approach as
 // ambulance-admin/EmtManagement.jsx, but 'accent' is the shared --mera-accent
@@ -34,10 +35,17 @@ const ROLE_LABELS = {
 };
 
 // Matches backend/accounts/models.py HOSPITAL_ROLES/AMBULANCE_ROLES — used
-// to filter the reassignment dropdown to the correct institution type.
+// to filter the reassignment dropdown to the correct institution type, and
+// as the ?type= filter (legacy role names included, as the dashboard
+// tiles count them).
 const ROLE_GROUPS = {
   hospital: new Set(['hospital', 'hospital_admin']),
   ambulance: new Set(['ambulance_service', 'ambulance_admin']),
+};
+
+const TYPE_LABELS = {
+  hospital: 'Hospitals',
+  ambulance: 'Ambulance services',
 };
 
 // Required onboarding documents (see HospitalAdminCreationSerializer/
@@ -307,6 +315,8 @@ export default function Institutions() {
   const [showCreate, setShowCreate] = useState(null); // null | 'hospital' | 'ambulance'
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useUrlFilter('type', ROLE_GROUPS);
+  const [showDeactivated, setShowDeactivated] = useState(false);
 
   // Debounce the search box — wait for typing to pause before hitting the
   // API, same pattern as hospital-admin/Patients.jsx.
@@ -331,6 +341,12 @@ export default function Institutions() {
     setInstitutions((prev) => prev.map((inst) => (inst.id === id ? { ...inst, ...patch } : inst)));
   };
 
+  // Filtered at render time from the full list, so a row deactivated or
+  // reactivated here (patchInstitution) moves in or out of view straight away.
+  const visibleInstitutions = typeFilter
+    ? institutions.filter((inst) => ROLE_GROUPS[typeFilter].has(inst.role) && (showDeactivated || inst.is_active !== false))
+    : institutions;
+
   return (
     <div style={{ padding: '24px 28px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, gap: 16, flexWrap: 'wrap' }}>
@@ -346,7 +362,7 @@ export default function Institutions() {
         </div>
       </div>
 
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
         <input
           type="text"
           placeholder="Search by name or email…"
@@ -354,17 +370,41 @@ export default function Institutions() {
           onChange={(e) => setSearchInput(e.target.value)}
           style={{ ...inputStyle, maxWidth: 360 }}
         />
+        <select
+          value={typeFilter}
+          onChange={(e) => setTypeFilter(e.target.value)}
+          aria-label="Filter by type"
+          style={{ ...inputStyle, width: 'auto' }}
+        >
+          <option value="">All types</option>
+          {Object.entries(TYPE_LABELS).map(([key, label]) => (
+            <option key={key} value={key}>{label}</option>
+          ))}
+        </select>
+        {typeFilter && (
+          <label style={{ ...mutedText, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={showDeactivated} onChange={(e) => setShowDeactivated(e.target.checked)} />
+            Show deactivated
+          </label>
+        )}
+        {typeFilter && !loading && !error && (
+          <span style={mutedText}>{visibleInstitutions.length} shown</span>
+        )}
       </div>
 
       <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: 'hidden', boxShadow: SHADOW.card }}>
         {loading && <p style={{ padding: 28, ...mutedText }}>Loading…</p>}
         {error && <p style={{ padding: 28, ...mutedText, color: COLORS.red }}>{error}</p>}
-        {!loading && !error && institutions.length === 0 && (
+        {!loading && !error && visibleInstitutions.length === 0 && (
           <p style={{ padding: 28, ...mutedText }}>
-            {search ? 'No institutions match that search.' : 'No institutions onboarded yet — create the first one above.'}
+            {search
+              ? 'No institutions match that search.'
+              : typeFilter
+                ? `No ${showDeactivated ? '' : 'active '}${TYPE_LABELS[typeFilter].toLowerCase()} found.`
+                : 'No institutions onboarded yet — create the first one above.'}
           </p>
         )}
-        {!loading && !error && institutions.length > 0 && (
+        {!loading && !error && visibleInstitutions.length > 0 && (
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr>
@@ -374,7 +414,7 @@ export default function Institutions() {
               </tr>
             </thead>
             <tbody>
-              {institutions.map((inst) => (
+              {visibleInstitutions.map((inst) => (
                 <tr key={inst.id} className="mera-row" style={{ borderBottom: `1px solid ${COLORS.border}` }}>
                   <td style={{ ...tdStyle, fontWeight: 600 }}>{inst.display_name || '—'}</td>
                   <td style={tdStyle}>{ROLE_LABELS[inst.role] || inst.role}</td>

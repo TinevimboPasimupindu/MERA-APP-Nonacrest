@@ -21,6 +21,7 @@ type Message = {
   role: 'user' | 'assistant';
   text: string;
   needsReferral?: boolean;
+  isEmergency?: boolean;
 };
 
 const QUICK_ACTIONS = [
@@ -132,8 +133,12 @@ export default function ChatbotScreen() {
       const botMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        text: response.reply,
+        // The backend always sends a reply: a normal answer, a calm refusal,
+        // an off-topic redirect, or emergency guidance (response_type says
+        // which). Only real failures come back as errors, handled below.
+        text: response.reply || "Your message wasn't answered. Send it again in a moment.",
         needsReferral: !!response.needs_referral,
+        isEmergency: response.response_type === 'emergency',
       };
 
       setMessages((prev) => [...prev, botMsg]);
@@ -239,6 +244,17 @@ export default function ChatbotScreen() {
                     {m.text}
                   </Text>
                 </View>
+
+                {m.isEmergency && (
+                  <TouchableOpacity
+                    style={styles.emergencyBanner}
+                    // Same navigation as the "Activate emergency" chip: opens
+                    // the dashboard's SOS button, never triggers SOS itself.
+                    onPress={() => router.dismissTo('/(patient)/patient-dashboard' as any)}
+                  >
+                    <Text style={styles.emergencyBannerText}>Go to the SOS button</Text>
+                  </TouchableOpacity>
+                )}
 
                 {m.needsReferral && (
                   <View style={styles.referralBanner}>
@@ -414,6 +430,18 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.sm,
     marginTop: -Spacing.sm,
   },
+  emergencyBanner: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#1A0404',
+    borderWidth: 1,
+    borderColor: Colors.danger,
+    borderRadius: BorderRadius.sm,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    marginBottom: Spacing.sm,
+    marginTop: -Spacing.xs,
+  },
+  emergencyBannerText: { color: Colors.danger, fontSize: FontSizes.xs, fontWeight: '600' },
   referralText: { color: '#E0C060', fontSize: FontSizes.xs, lineHeight: 16 },
   quickRow: {
     maxHeight: 52,
